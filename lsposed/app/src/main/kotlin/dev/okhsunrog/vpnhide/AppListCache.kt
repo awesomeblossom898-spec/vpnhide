@@ -1,6 +1,7 @@
 package dev.okhsunrog.vpnhide
 
 import android.content.Context
+import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.drawable.Drawable
@@ -23,6 +24,7 @@ internal data class AppSummary(
     val icon: Drawable?,
     val isSystem: Boolean,
     val userIds: List<Int> = emptyList(),
+    val isVpnProvider: Boolean = false,
 )
 
 /**
@@ -98,6 +100,7 @@ internal object AppListCache : StateCache<List<AppSummary>>(
             val pm = appContext.packageManager
             val (packages, users) = loadPackagesAndUsersViaRoot()
             _userNames.value = users
+            val vpnPackages = detectVpnProviderPackages(pm)
             if (packages.isNotEmpty()) {
                 packages.entries
                     .map { (pkg, meta) ->
@@ -127,6 +130,7 @@ internal object AppListCache : StateCache<List<AppSummary>>(
                             icon = effectiveInfo?.let { runCatching { pm.getApplicationIcon(it) }.getOrNull() },
                             isSystem = isSystem,
                             userIds = meta.userIds,
+                            isVpnProvider = pkg in vpnPackages,
                         )
                     }.sortedBy { it.label.lowercase() }
             } else {
@@ -140,6 +144,7 @@ internal object AppListCache : StateCache<List<AppSummary>>(
                             icon = runCatching { pm.getApplicationIcon(info) }.getOrNull(),
                             isSystem = (info.flags and ApplicationInfo.FLAG_SYSTEM) != 0,
                             userIds = listOf(Process.myUid() / 100000),
+                            isVpnProvider = info.packageName in vpnPackages,
                         )
                     }.sortedBy { it.label.lowercase() }
             }
@@ -236,6 +241,16 @@ internal object AppListCache : StateCache<List<AppSummary>>(
         }
         return out
     }
+
+    @Suppress("DEPRECATION")
+    private fun detectVpnProviderPackages(pm: PackageManager): Set<String> =
+        runCatching {
+            pm
+                .queryIntentServices(Intent("android.net.VpnService"), 0)
+                .filter { it.serviceInfo?.permission == "android.permission.BIND_VPN_SERVICE" }
+                .mapNotNull { it.serviceInfo?.packageName }
+                .toSet()
+        }.getOrElse { emptySet() }
 
     @Suppress("DEPRECATION")
     private fun loadArchiveApplicationInfo(

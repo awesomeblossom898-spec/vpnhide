@@ -40,8 +40,9 @@
     <!-- App hiding -->
     <string name="hiding_chip_hidden" translatable="false">H</string>
     <string name="hiding_chip_observer" translatable="false">O</string>
+    <string name="hiding_chip_vpn_provider" translatable="false">VPN</string>
     <string name="hiding_help_title">How app hiding works</string>
-    <string name="hiding_hint_roles">Mark apps as H (Hidden) to remove them from the package manager for O (Observer) apps. Observers cannot list, resolve, or query any Hidden app.</string>
+    <string name="hiding_hint_roles">All installed VPN providers are automatically detected and hidden from O (Observer) apps — no manual setup needed. You can still mark any other app with H to add it to the hidden list manually. Mark apps as O to block them from seeing hidden apps. VPN providers show a VPN badge and cannot be set as observers.</string>
     <string name="hiding_hint_system">System callers (installer, launcher, system services) are always exempt so core OS functionality keeps working.</string>
     <string name="hiding_hint_reboot">Changes take effect immediately, but observer apps may cache the package list — force-stop and restart them to see results.</string>
     <string name="hiding_save_success">Saved · %1$d hidden, %2$d observers</string>

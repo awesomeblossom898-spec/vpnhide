@@ -13,13 +13,13 @@ internal data class HidingEntry(
     override val icon: Drawable?,
     override val isSystem: Boolean,
     override val userIds: List<Int> = emptyList(),
-    val hidden: Boolean = false,
+    val isVpnProvider: Boolean = false,
+    val manuallyHidden: Boolean = false,
     val observer: Boolean = false,
 ) : TargetEntry {
-    override val anySelected get() = hidden || observer
+    val effectivelyHidden get() = isVpnProvider || manuallyHidden
+    override val anySelected get() = effectivelyHidden || observer
 }
-
-internal enum class HidingRole { HIDDEN, OBSERVER }
 
 @Composable
 fun AppHidingScreen(
@@ -52,11 +52,6 @@ fun AppHidingScreen(
             )
         },
         merge = { apps, t, selfPkg ->
-            // Packages with both roles crash on startup: the app queries its own
-            // PackageInfo/ResolveInfo during init, we detect the observer caller
-            // (itself) and strip its own package from the result, so frameworks
-            // see a self-lookup NameNotFoundException and bail. Collapse to
-            // observer-only on load so the next Save persists the fix.
             val hidden = t.hiddenPkgs
             val observers = t.observerNames
             var autoFixedConflict = false
@@ -64,14 +59,21 @@ fun AppHidingScreen(
                 apps
                     .filter { it.packageName != selfPkg }
                     .map { app ->
-                        val rawHidden = app.packageName in hidden
-                        val rawObserver = app.packageName in observers
-                        val (finalHidden, finalObserver) =
-                            if (rawHidden && rawObserver) {
+                        // VPN providers are auto-hidden; they cannot be observers —
+                        // being an observer while also in the hidden list causes the
+                        // app to strip its own package from PM results on startup,
+                        // producing a self-lookup NameNotFoundException and a crash.
+                        val rawObserver = !app.isVpnProvider && app.packageName in observers
+                        // Preserve manual-hide only for non-VPN packages. Packages
+                        // covered by VPN auto-detection don't need a manual flag,
+                        // and keeping it would show a stale H toggle on upgrade.
+                        val rawManuallyHidden = !app.isVpnProvider && app.packageName in hidden
+                        val (finalManuallyHidden, finalObserver) =
+                            if (rawManuallyHidden && rawObserver) {
                                 autoFixedConflict = true
                                 false to true
                             } else {
-                                rawHidden to rawObserver
+                                rawManuallyHidden to rawObserver
                             }
                         HidingEntry(
                             packageName = app.packageName,
@@ -79,52 +81,35 @@ fun AppHidingScreen(
                             icon = app.icon,
                             isSystem = app.isSystem,
                             userIds = app.userIds,
-                            hidden = finalHidden,
+                            isVpnProvider = app.isVpnProvider,
+                            manuallyHidden = finalManuallyHidden,
                             observer = finalObserver,
                         )
                     }
             MergeResult(entries, resaveNeeded = autoFixedConflict)
         },
         countText = { entries, _ ->
-            "H: ${entries.count { it.hidden }} · O: ${entries.count { it.observer }}"
+            "VPN: ${entries.count { it.isVpnProvider }} · H: ${entries.count { it.manuallyHidden }} · O: ${entries.count { it.observer }}"
         },
         buildSaveCommand = { entries, selfPkg, header ->
-            // Always include self in the hidden list — self is managed invisibly, never shown in UI.
+            // VPN providers (auto) + manually hidden + self are all written to the
+            // hidden list. Self is managed invisibly, never shown in the UI.
             val hiddenPkgs =
-                (entries.filter { it.hidden }.map { it.packageName } + selfPkg).distinct().sorted()
+                (entries.filter { it.effectivelyHidden }.map { it.packageName } + selfPkg)
+                    .distinct()
+                    .sorted()
             val observerPkgs = entries.filter { it.observer }.map { it.packageName }.sorted()
             buildHidingSaveCommand(header, hiddenPkgs, observerPkgs)
         },
         successMessage = { entries, res ->
             res.getString(
                 R.string.hiding_save_success,
-                entries.count { it.hidden },
+                entries.count { it.effectivelyHidden },
                 entries.count { it.observer },
             )
         },
     ) { app, userNames, _, onChange ->
-        HidingAppRow(
-            app = app,
-            userNames = userNames,
-            onToggle = { role ->
-                // Roles are mutually exclusive: turning one on forces the other
-                // off. Avoids the H+O self-hide crash (app can't resolve its own
-                // package info).
-                onChange(
-                    when (role) {
-                        HidingRole.HIDDEN -> {
-                            val newHidden = !app.hidden
-                            app.copy(hidden = newHidden, observer = if (newHidden) false else app.observer)
-                        }
-
-                        HidingRole.OBSERVER -> {
-                            val newObserver = !app.observer
-                            app.copy(observer = newObserver, hidden = if (newObserver) false else app.hidden)
-                        }
-                    },
-                )
-            },
-        )
+        HidingAppRow(app = app, userNames = userNames, onChange = onChange)
     }
 }
 
@@ -158,7 +143,7 @@ private fun buildHidingSaveCommand(
 private fun HidingAppRow(
     app: HidingEntry,
     userNames: Map<Int, String>,
-    onToggle: (HidingRole) -> Unit,
+    onChange: (HidingEntry) -> Unit,
 ) {
     TargetRowShell(
         label = app.label,
@@ -167,15 +152,43 @@ private fun HidingAppRow(
         userIds = app.userIds,
         userNames = userNames,
     ) {
-        TargetChip(
-            label = stringResource(R.string.hiding_chip_hidden),
-            enabled = app.hidden,
-            onClick = { onToggle(HidingRole.HIDDEN) },
-        )
-        TargetChip(
-            label = stringResource(R.string.hiding_chip_observer),
-            enabled = app.observer,
-            onClick = { onToggle(HidingRole.OBSERVER) },
-        )
+        if (app.isVpnProvider) {
+            // Auto-detected VPN provider: static non-interactive badge.
+            // The app cannot also be an observer — see merge comment above.
+            TargetChip(
+                label = stringResource(R.string.hiding_chip_vpn_provider),
+                enabled = true,
+                available = false,
+                onClick = {},
+            )
+        } else {
+            // Non-VPN app: manual H and O toggles, mutually exclusive.
+            TargetChip(
+                label = stringResource(R.string.hiding_chip_hidden),
+                enabled = app.manuallyHidden,
+                onClick = {
+                    val newHidden = !app.manuallyHidden
+                    onChange(
+                        app.copy(
+                            manuallyHidden = newHidden,
+                            observer = if (newHidden) false else app.observer,
+                        ),
+                    )
+                },
+            )
+            TargetChip(
+                label = stringResource(R.string.hiding_chip_observer),
+                enabled = app.observer,
+                onClick = {
+                    val newObserver = !app.observer
+                    onChange(
+                        app.copy(
+                            observer = newObserver,
+                            manuallyHidden = if (newObserver) false else app.manuallyHidden,
+                        ),
+                    )
+                },
+            )
+        }
     }
 }
