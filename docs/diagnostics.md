@@ -116,7 +116,7 @@ results. A `null` answer (no root) does not block.
 
 ## 7. Native check → owning hook (KPM/kmod), verified on Pixel 4a
 
-The kernel backend's 10 hooks map to the diagnostic checks below; the "gaps" rows are
+The kernel backend's 11 logical hooks map to the diagnostic checks below; the "gaps" rows are
 SELinux/zygisk territory by design, not bugs. Full hiding matrix in
 [detection-vectors.md](detection-vectors.md).
 
@@ -132,6 +132,14 @@ SELinux/zygisk territory by design, not bugs. Full hiding matrix in
 | `proc_if_inet6` | `/proc/net/if_inet6` | **(none)** | no kernel seq_show hook — zygisk `openat` or SELinux only |
 | `proc_dev` | `/proc/net/dev` | **(none)** | zygisk `openat` or SELinux only |
 | `sys_class_net` | `/sys/class/net` | **(none)** | SELinux only |
+
+`socket_bind_interface` intentionally has no app-process root-differential row
+yet. An honest test needs the hidden interface name/index from the root view,
+must pass that exact value into the already-targeted app process, and then must
+inspect the socket from a non-target UID; simply checking the returned errno
+would bless the broken return-only implementation this hook was designed to
+avoid. The QEMU `bind-probe` performs that full state-level test with a raw
+syscall and an inherited socket. Runtime hits still appear in Statistics.
 
 Java-level checks (LSPosed) cover the framework side — `hasTransport(VPN)`,
 `NET_CAPABILITY_NOT_VPN`, `VpnTransportInfo`, `getAllNetworks`, `LinkProperties`,

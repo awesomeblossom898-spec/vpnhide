@@ -21,6 +21,7 @@ KDIR="$CACHE/$KMI"
 #   VPNHIDE_QEMU_KO     - module .ko   (from the kmod build artifact)
 #   VPNHIDE_QEMU_ROOTFS - Alpine minirootfs tarball (baked in the image)
 #   VPNHIDE_GAI_BIN     - optional prebuilt bionic getifaddrs probe
+#   VPNHIDE_BIND_BIN    - optional prebuilt raw-syscall socket bind probe
 IMAGE="${VPNHIDE_QEMU_IMAGE:-$KDIR/Image}"
 KO="${VPNHIDE_QEMU_KO:-$KDIR/vpnhide_kmod.ko}"
 
@@ -82,8 +83,35 @@ if [ -z "$IFC" ] && [ -n "${VPNHIDE_IFC_REQUIRED:-}" ]; then
 	exit 2
 fi
 
+# --- state-aware socket binding probe ----------------------------------------
+# This must be a native arm64 binary because it issues setsockopt with an inline
+# svc and shares the resulting socket across target/non-target child processes.
+BIND=""
+if [ -n "${VPNHIDE_BIND_BIN:-}" ] && [ -x "${VPNHIDE_BIND_BIN:-}" ]; then
+	BIND="$VPNHIDE_BIND_BIN"
+	echo "[run] socket bind probe: prebuilt ($BIND)"
+else
+	BIND_CC="${VPNHIDE_BIND_CC:-$(find "$HOME/Android/Sdk/ndk" -type f -path '*/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android*-clang' 2>/dev/null | sort | tail -1 || true)}"
+	if [ -n "$BIND_CC" ] && [ -x "$BIND_CC" ]; then
+		BIND="$CACHE/bind-probe"
+		"$BIND_CC" -static -O2 -Wall -Wextra -Werror \
+			-o "$BIND" "$HERE/bind-probe.c" 2>/dev/null || BIND=""
+	fi
+	[ -n "$BIND" ] && echo "[run] socket bind probe built ($(basename "$BIND_CC"))" || \
+		echo "[run] no bionic toolchain/binary — skipping socket bind vectors"
+fi
+
+if [ -z "$BIND" ] && [ -n "${VPNHIDE_BIND_REQUIRED:-}" ]; then
+	echo "ERROR: socket bind probe is required here (VPNHIDE_BIND_REQUIRED set) but unavailable."
+	exit 2
+fi
+
 WORK="$(mktemp -d)"
-trap 'rm -rf "$WORK"' EXIT
+if [ -n "${VPNHIDE_QEMU_KEEP_WORK:-}" ]; then
+	echo "[run] preserving QEMU work directory: $WORK"
+else
+	trap 'rm -rf "$WORK"' EXIT
+fi
 RFS="$WORK/rootfs"
 mkdir -p "$RFS"
 tar xzf "$ALPINE_TAR" -C "$RFS"
@@ -92,6 +120,7 @@ cp "$HERE/init.sh" "$RFS/init"
 chmod +x "$RFS/init"
 [ -n "$GAI" ] && { cp "$GAI" "$RFS/gai"; chmod +x "$RFS/gai"; }
 [ -n "$IFC" ] && { cp "$IFC" "$RFS/ifconf"; chmod +x "$RFS/ifconf"; }
+[ -n "$BIND" ] && { cp "$BIND" "$RFS/bind-probe"; chmod +x "$RFS/bind-probe"; }
 ( cd "$RFS" && find . | cpio -o -H newc 2>/dev/null | gzip > "$WORK/initramfs.cpio.gz" )
 
 LOG="$WORK/serial.log"

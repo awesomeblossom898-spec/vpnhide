@@ -7,7 +7,7 @@ import dev.okhsunrog.vpnhide.generated.HookIds
 // glance. "Native" covers both the kernel backends and Zygisk's libc hooks.
 internal enum class MethodSurface { Java, Native, Package }
 
-// User-facing detection method: a small taxonomy over the 18 raw hooks so the
+// User-facing detection method: a small taxonomy over the raw hook registry so the
 // Statistics screen reads as "what the app tried" instead of kernel symbol
 // names. Several hooks fold into one method (e.g. the four route hooks).
 internal enum class DetectionMethod(
@@ -19,6 +19,7 @@ internal enum class DetectionMethod(
     Routes(MethodSurface.Native, R.string.method_routes, R.string.method_desc_routes),
     Interfaces(MethodSurface.Native, R.string.method_interfaces, R.string.method_desc_interfaces),
     InterfaceIoctl(MethodSurface.Native, R.string.method_interface_ioctl, R.string.method_desc_interface_ioctl),
+    SocketBinding(MethodSurface.Native, R.string.method_socket_binding, R.string.method_desc_socket_binding),
     PolicyRules(MethodSurface.Native, R.string.method_policy_rules, R.string.method_desc_policy_rules),
     NetworkCapabilities(MethodSurface.Java, R.string.method_network_capabilities, R.string.method_desc_network_capabilities),
     LinkProperties(MethodSurface.Java, R.string.method_link_properties, R.string.method_desc_link_properties),
@@ -47,6 +48,8 @@ internal enum class DetectionMethod(
                 -> InterfaceIoctl
 
                 HookIds.Hook.FIB_NL_FILL_RULE -> PolicyRules
+
+                HookIds.Hook.SOCKET_BIND_INTERFACE -> SocketBinding
 
                 HookIds.Hook.LSPOSED_NETWORK_CAPABILITIES -> NetworkCapabilities
 

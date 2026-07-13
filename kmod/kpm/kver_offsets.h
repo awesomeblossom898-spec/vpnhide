@@ -37,6 +37,14 @@ struct vpnhide_offsets {
 	 * the new cacheline-group reorg (@296). */
 	unsigned int netdev_name;
 
+	/* Socket binding interception. `socket_sk` is offsetof(struct socket,
+	 * sk); `sock_net` is offsetof(struct sock_common, skc_net), whose
+	 * possible_net_t payload is the struct net*. The sockptr_t and additional
+	 * sk_setsockopt ABI gates are version-derived in vpnhide_kpm.c because they
+	 * are function-signature changes, not struct offsets. */
+	unsigned int socket_sk;
+	unsigned int sock_net;
+
 	/* seq_file.{buf,count} — stable across the seq_file lifetime. */
 	unsigned int seqfile_buf;
 	unsigned int seqfile_count;
@@ -119,6 +127,8 @@ struct vpnhide_offsets {
 static const struct vpnhide_offsets vpnhide_off_6_1 = {
 	.skb_len = 112, /* modern head + _nfct (conntrack on in GKI 6.1) */
 	.netdev_name = 0,
+	.socket_sk = 24,
+	.sock_net = 48,
 	.seqfile_buf = 0,
 	.seqfile_count = 24,
 	.in_ifaddr_ifa_dev = 24,
@@ -158,6 +168,8 @@ static const struct vpnhide_offsets vpnhide_off_6_12 = {
 	 * compiling offsetof(struct net_device, name) against the gki_defconfig
 	 * 6.12 headers). Every other version keeps name@0. */
 	.netdev_name = 296,
+	.socket_sk = 24,
+	.sock_net = 48,
 	.seqfile_buf = 0,
 	.seqfile_count = 24,
 	.in_ifaddr_ifa_dev = 24,
@@ -190,6 +202,8 @@ static const struct vpnhide_offsets vpnhide_off_5_x = {
 			 * len@112. Reading 104 trims netlink dumps to garbage and
 			 * drops non-VPN rows alongside vpn0. */
 	.netdev_name = 0,
+	.socket_sk = 24,
+	.sock_net = 48,
 	.seqfile_buf = 0,
 	.seqfile_count = 24,
 	/* in_ifaddr: hash(16)+ifa_next(8) -> ifa_dev@24; in_device.dev@0. */
@@ -234,6 +248,8 @@ static const struct vpnhide_offsets vpnhide_off_5_15 = {
 	.skb_len = 112, /* GKI 5.15 has CONFIG_NF_CONNTRACK=y: _nfct@104,
 			 * len@112. Same rollback requirement as 5.10. */
 	.netdev_name = 0,
+	.socket_sk = 24,
+	.sock_net = 48,
 	.seqfile_buf = 0,
 	.seqfile_count = 24,
 	.in_ifaddr_ifa_dev = 24,
@@ -272,6 +288,8 @@ static const struct vpnhide_offsets vpnhide_off_5_4 = {
 			 * the device-faithful value; a conntrack-less kernel would
 			 * be @104 (cf. the 5.10 test kernel). */
 	.netdev_name = 0,
+	.socket_sk = 24,
+	.sock_net = 48,
 	.seqfile_buf = 0,
 	.seqfile_count = 24,
 	.in_ifaddr_ifa_dev = 24, /* hash(16)+ifa_next(8) — same as 5.10 */
@@ -315,6 +333,8 @@ static const struct vpnhide_offsets vpnhide_off_4_19 = {
 	 * back to a pointer field and can make getifaddrs() look completely empty. */
 	.skb_len = 128,
 	.netdev_name = 0,
+	.socket_sk = 32,
+	.sock_net = 48,
 	.seqfile_buf = 0,
 	.seqfile_count = 24,
 	.in_ifaddr_ifa_dev = 24,
@@ -360,6 +380,8 @@ static const struct vpnhide_offsets vpnhide_off_4_x = {
 	 * the 4.14 images we validate with, including sunfish 4.14.302. */
 	.skb_len = 128,
 	.netdev_name = 0,
+	.socket_sk = 32,
+	.sock_net = 48,
 	.seqfile_buf = 0,
 	.seqfile_count = 24,
 	.in_ifaddr_ifa_dev =

@@ -28,9 +28,12 @@ RUN curl -fsSL "https://dl.google.com/android/repository/android-ndk-${NDK_VER}-
     unzip -q /tmp/ndk.zip "android-ndk-${NDK_VER}/toolchains/llvm/prebuilt/linux-x86_64/*" \
         -d /opt && rm /tmp/ndk.zip
 COPY kmod/test/gai-probe.c /tmp/gai-probe.c
+COPY kmod/test/bind-probe.c /tmp/bind-probe.c
 RUN TC="/opt/android-ndk-${NDK_VER}/toolchains/llvm/prebuilt/linux-x86_64/bin" && \
     "$TC/aarch64-linux-android24-clang" -static -O2 -o /opt/gai /tmp/gai-probe.c && \
-    "$TC/llvm-strip" /opt/gai
+    "$TC/aarch64-linux-android24-clang" -static -O2 -Wall -Wextra -Werror \
+        -o /opt/bind-probe /tmp/bind-probe.c && \
+    "$TC/llvm-strip" /opt/gai /opt/bind-probe
 
 FROM debian:trixie-slim
 
@@ -62,10 +65,11 @@ RUN mkdir -p /opt/qemu/kp && \
             -o "/opt/qemu/kp/$a"; \
     done && chmod +x /opt/qemu/kp/kptools-linux
 
-# Prebuilt bionic getifaddrs probe (built from gai-probe.c with the NDK in the
-# `gai` stage). run-kpm.sh picks it up via VPNHIDE_GAI_BIN so the addr-fill
-# hook is validated in CI on every legacy kernel — not skipped.
+# Prebuilt bionic getifaddrs and raw-syscall socket bind probes. Old kernels
+# normally deny the first bind natively; running the probe still guards that
+# assumption and makes any future behavior change visible.
 COPY --from=gai /opt/gai /opt/qemu/gai
+COPY --from=gai /opt/bind-probe /opt/qemu/bind-probe
 
 # run-kpm.sh reads these. The per-version Image lives at
 # /opt/qemu/legacy/<ver>/Image — the CI job sets VPNHIDE_QEMU_IMAGE +
@@ -73,3 +77,4 @@ COPY --from=gai /opt/gai /opt/qemu/gai
 ENV VPNHIDE_QEMU_ROOTFS=/opt/qemu/alpine-minirootfs.tar.gz
 ENV VPNHIDE_KP_BIN=/opt/qemu/kp
 ENV VPNHIDE_GAI_BIN=/opt/qemu/gai
+ENV VPNHIDE_BIND_BIN=/opt/qemu/bind-probe

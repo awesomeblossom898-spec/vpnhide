@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 /*
  * vpnhide_kmod — kernel module that hides VPN network interfaces from
- * selected Android apps by filtering ioctl, netlink, and procfs
- * responses based on the calling process's UID.
+ * selected Android apps by filtering ioctl, netlink, and procfs responses and
+ * refusing VPN-interface socket binds based on the calling process's UID.
  *
- * Uses kretprobes so no modification of the running kernel is needed;
- * works on stock Android GKI kernels with CONFIG_KPROBES=y.
+ * Uses kretprobes for return-value/data filtering and ordinary entry kprobes
+ * for pre-mutation socket-bind replacement, so no modification of the running
+ * kernel is needed; works on stock Android GKI kernels with CONFIG_KPROBES=y.
  *
  * Hooks:
  *   - dev_ioctl: filters SIOCGIFFLAGS / SIOCGIFNAME / SIOCGIFMTU / etc.
@@ -18,6 +19,8 @@
  *   - fib_dump_info: filters IPv4 RTM_GETROUTE dump replies
  *   - rt6_fill_node: filters IPv6 RTM_GETROUTE replies
  *   - fib_nl_fill_rule: filters policy routing rules for target UIDs
+ *   - sock_setsockopt / sk_setsockopt: denies SO_BINDTODEVICE and
+ *     SO_BINDTOIFINDEX for hidden VPN interfaces before socket state changes
  *
  * Control plane: a single folded node /proc/vpnhide_ctl carries the shared
  * control/stats protocol (docs/protocol.md). A write is a `vpnhide 1 config`
@@ -26,9 +29,10 @@
  * list) and /proc/vpnhide_debug nodes — the same wire format every backend now
  * speaks (parser shared verbatim with the KPM via shared/vpnhide_logic.h).
  *
- * Architecture: arm64 only. The handlers read syscall arguments via
- * `regs->regs[N]` (AAPCS64 calling convention). On other architectures
- * those slots have a different meaning, so the build is gated below.
+ * Architecture: arm64 only. Several handlers read function arguments via
+ * `regs->regs[N]`, and the socket-bind entry probes redirect the saved PC
+ * according to AAPCS64. On other architectures those registers have a
+ * different meaning, so the build is gated below.
  */
 
 #include <linux/module.h>
@@ -48,6 +52,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/skbuff.h>
 #include <linux/inetdevice.h>
+#include <linux/rcupdate.h>
 #include <net/sock.h>
 #include <net/if_inet6.h>
 #include <net/ip_fib.h>
@@ -83,7 +88,7 @@
  *
  * 64 covers a comfortable working set (apps × threads doing
  * getifaddrs/SIOCGIFCONF/route reads at once) without burning
- * meaningful memory: 6 probes × 64 instances × ~80 B ≈ 30 KB total.
+ * meaningful memory: 10 probes × 64 instances × ~80 B ≈ 50 KB total.
  */
 #define VPNHIDE_KRETPROBE_MAXACTIVE 64
 
@@ -403,6 +408,297 @@ static struct kretprobe dev_ioctl_krp = {
 	.maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
 	.kp.symbol_name = "dev_ioctl",
 };
+
+/* ================================================================== */
+/*  Hook 11: SO_BINDTODEVICE / SO_BINDTOIFINDEX                       */
+/*                                                                    */
+/*  A return-only kretprobe would be wrong here: by return time the   */
+/*  kernel has already changed sk_bound_dev_if, so merely reporting   */
+/*  ENODEV leaves a usable bound socket behind. A kprobe entry handler */
+/*  cannot solve this safely either: it runs in atomic context, where */
+/*  a not-yet-resident userspace option page cannot be faulted in.     */
+/*                                                                    */
+/*  These functions therefore use an ordinary entry kprobe's supported */
+/*  execution-path redirection: its atomic pre_handler only changes PC */
+/*  and returns !0. The replacement wrapper then runs after exception  */
+/*  handling has finished, in the original process context, where      */
+/*  copy_from_sockptr may fault normally. It snapshots the option once */
+/*  and passes an immutable KERNEL_SOCKPTR to the original function,   */
+/*  eliminating userspace TOCTOU. A hidden interface returns ENODEV    */
+/*  without ever calling the mutation path.                            */
+/*                                                                    */
+/*  sock_setsockopt is the ordinary SOL_SOCKET path on every shipped  */
+/*  GKI. On 6.1+ MPTCP can delegate directly to sk_setsockopt, so that */
+/*  symbol is covered as a second required registration there.       */
+/* ================================================================== */
+
+union socket_bind_snapshot {
+	char name[IFNAMSIZ];
+	int ifindex;
+};
+
+enum socket_bind_action {
+	VPNHIDE_BIND_PASSTHROUGH,
+	VPNHIDE_BIND_FROZEN,
+	VPNHIDE_BIND_DENY,
+	VPNHIDE_BIND_FAULT,
+};
+
+/* 1 = VPN interface, 0 = physical/non-VPN, -1 = unknown. Unknown positive
+ * indexes fail closed: sock_bindtoindex accepts a non-existent positive index,
+ * which would otherwise leave observable state on the socket. */
+static int classify_bind_ifindex(struct sock *sk, int ifindex)
+{
+	struct net_device *dev;
+	int result = -1;
+
+	if (!sk || ifindex <= 0)
+		return ifindex == 0 ? 0 : -1;
+	rcu_read_lock();
+	dev = dev_get_by_index_rcu(sock_net(sk), ifindex);
+	if (dev)
+		result = is_vpn_ifname(dev->name) ? 1 : 0;
+	rcu_read_unlock();
+	return result;
+}
+
+static enum socket_bind_action
+prepare_socket_bind(struct sock *sk, int level, int optname, sockptr_t optval,
+		    unsigned int optlen, union socket_bind_snapshot *snapshot)
+{
+	if (level != SOL_SOCKET ||
+	    !hook_active(VPNHIDE_HOOK_SOCKET_BIND_INTERFACE))
+		return VPNHIDE_BIND_PASSTHROUGH;
+	if (optname != SO_BINDTODEVICE && optname != SO_BINDTOIFINDEX)
+		return VPNHIDE_BIND_PASSTHROUGH;
+
+	memset(snapshot, 0, sizeof(*snapshot));
+	if (optname == SO_BINDTODEVICE) {
+		size_t n;
+
+		/* sock_setbindtodevice takes an int and rejects this before
+		 * touching optval. Preserve EINVAL and avoid needless uaccess. */
+		if ((int)optlen < 0)
+			return VPNHIDE_BIND_PASSTHROUGH;
+		n = min_t(size_t, optlen, IFNAMSIZ - 1);
+
+		if (n && copy_from_sockptr(snapshot->name, optval, n))
+			return VPNHIDE_BIND_FAULT;
+		if (snapshot->name[0] && is_vpn_ifname(snapshot->name))
+			return VPNHIDE_BIND_DENY;
+		return VPNHIDE_BIND_FROZEN;
+	}
+
+	if (optlen < sizeof(snapshot->ifindex))
+		return VPNHIDE_BIND_PASSTHROUGH;
+	if (copy_from_sockptr(&snapshot->ifindex, optval,
+			      sizeof(snapshot->ifindex)))
+		return VPNHIDE_BIND_FAULT;
+	if (snapshot->ifindex > 0 &&
+	    classify_bind_ifindex(sk, snapshot->ifindex) != 0)
+		return VPNHIDE_BIND_DENY;
+	return VPNHIDE_BIND_FROZEN;
+}
+
+typedef int (*sock_setsockopt_fn)(struct socket *, int, int, sockptr_t,
+				  unsigned int);
+static sock_setsockopt_fn original_sock_setsockopt;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+typedef int (*sk_setsockopt_fn)(struct sock *, int, int, sockptr_t,
+				unsigned int);
+static sk_setsockopt_fn original_sk_setsockopt;
+#endif
+
+/* noinline + a post-call barrier keep the original call from becoming a tail
+ * branch: the redirect kprobe uses the module return address to distinguish it
+ * from an external call that must be redirected. __nocfi is required for the
+ * non-exported sk_setsockopt address resolved through kprobe metadata. */
+static noinline __nocfi int
+call_original_sock_setsockopt(struct socket *sock, int level, int optname,
+			      sockptr_t optval, unsigned int optlen)
+{
+	int ret =
+		original_sock_setsockopt(sock, level, optname, optval, optlen);
+
+	barrier();
+	return ret;
+}
+
+static noinline int vpnhide_sock_setsockopt(struct socket *sock, int level,
+					    int optname, sockptr_t optval,
+					    unsigned int optlen)
+{
+	union socket_bind_snapshot snapshot;
+	enum socket_bind_action action =
+		prepare_socket_bind(sock ? READ_ONCE(sock->sk) : NULL, level,
+				    optname, optval, optlen, &snapshot);
+
+	if (action == VPNHIDE_BIND_DENY) {
+		record_hook_hit(VPNHIDE_HOOK_SOCKET_BIND_INTERFACE);
+		return -ENODEV;
+	}
+	if (action == VPNHIDE_BIND_FAULT)
+		return -EFAULT;
+	if (action == VPNHIDE_BIND_FROZEN)
+		optval = KERNEL_SOCKPTR(&snapshot);
+	return call_original_sock_setsockopt(sock, level, optname, optval,
+					     optlen);
+}
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+static noinline __nocfi int call_original_sk_setsockopt(struct sock *sk,
+							int level, int optname,
+							sockptr_t optval,
+							unsigned int optlen)
+{
+	int ret = original_sk_setsockopt(sk, level, optname, optval, optlen);
+
+	barrier();
+	return ret;
+}
+
+static noinline int vpnhide_sk_setsockopt(struct sock *sk, int level,
+					  int optname, sockptr_t optval,
+					  unsigned int optlen)
+{
+	union socket_bind_snapshot snapshot;
+	enum socket_bind_action action = prepare_socket_bind(
+		sk, level, optname, optval, optlen, &snapshot);
+
+	if (action == VPNHIDE_BIND_DENY) {
+		record_hook_hit(VPNHIDE_HOOK_SOCKET_BIND_INTERFACE);
+		return -ENODEV;
+	}
+	if (action == VPNHIDE_BIND_FAULT)
+		return -EFAULT;
+	if (action == VPNHIDE_BIND_FROZEN)
+		optval = KERNEL_SOCKPTR(&snapshot);
+	return call_original_sk_setsockopt(sk, level, optname, optval, optlen);
+}
+#endif
+
+struct socket_bind_kprobe_hook {
+	const char *name;
+	unsigned long replacement;
+	struct kprobe kp;
+	bool registered;
+};
+
+static bool socket_bind_hooks_ready;
+
+static int socket_bind_kprobe_pre(struct kprobe *kp, struct pt_regs *regs)
+{
+	struct socket_bind_kprobe_hook *hook =
+		container_of(kp, struct socket_bind_kprobe_hook, kp);
+	unsigned long parent_ip = regs->regs[30];
+
+	if (!READ_ONCE(socket_bind_hooks_ready) ||
+	    within_module(parent_ip, THIS_MODULE))
+		return 0;
+	instruction_pointer_set(regs, hook->replacement);
+	/* Per Documentation/trace/kprobes.rst, !0 tells kprobes not to
+	 * single-step the replaced first instruction and to resume at our PC. */
+	return 1;
+}
+
+/* A post_handler keeps these probes out of the optimized-kprobe detour path,
+ * where changing PC from the pre_handler is not supported. It is reached only
+ * for the module's intentional call-through to the original function. */
+static void socket_bind_kprobe_post(struct kprobe *kp, struct pt_regs *regs,
+				    unsigned long flags)
+{
+	(void)kp;
+	(void)regs;
+	(void)flags;
+}
+
+static struct socket_bind_kprobe_hook socket_bind_kprobe_hooks[] = {
+	{
+		.name = "sock_setsockopt",
+		.replacement = (unsigned long)vpnhide_sock_setsockopt,
+		.kp = {
+			.symbol_name = "sock_setsockopt",
+			.pre_handler = socket_bind_kprobe_pre,
+			.post_handler = socket_bind_kprobe_post,
+		},
+	},
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	{
+		.name = "sk_setsockopt",
+		.replacement = (unsigned long)vpnhide_sk_setsockopt,
+		.kp = {
+			.symbol_name = "sk_setsockopt",
+			.pre_handler = socket_bind_kprobe_pre,
+			.post_handler = socket_bind_kprobe_post,
+		},
+	},
+#endif
+};
+
+static bool socket_bind_hooks_registered;
+
+static void unregister_socket_bind_hooks(void)
+{
+	bool must_drain = READ_ONCE(socket_bind_hooks_ready);
+	int i;
+
+	WRITE_ONCE(socket_bind_hooks_ready, false);
+	for (i = ARRAY_SIZE(socket_bind_kprobe_hooks) - 1; i >= 0; i--) {
+		struct socket_bind_kprobe_hook *hook =
+			&socket_bind_kprobe_hooks[i];
+
+		if (!hook->registered)
+			continue;
+		unregister_kprobe(&hook->kp);
+		hook->registered = false;
+		pr_info(MODNAME ": redirect kprobe(%s) unregistered\n",
+			hook->name);
+	}
+	/* A redirected wrapper executes after the kprobe exception handler has
+	 * returned, so unregister_kprobe() alone cannot see it. Wait until every
+	 * task that could have observed hooks_ready=true passes through a Tasks-RCU
+	 * quiescent state before module text may be freed on rmmod/init failure. */
+	if (must_drain)
+		synchronize_rcu_tasks();
+	socket_bind_hooks_registered = false;
+}
+
+static int register_socket_bind_hooks(void)
+{
+	int i, ret;
+
+	WRITE_ONCE(socket_bind_hooks_ready, false);
+	for (i = 0; i < ARRAY_SIZE(socket_bind_kprobe_hooks); i++) {
+		struct socket_bind_kprobe_hook *hook =
+			&socket_bind_kprobe_hooks[i];
+
+		ret = register_kprobe(&hook->kp);
+		if (ret)
+			goto fail;
+		hook->registered = true;
+		if (i == 0)
+			original_sock_setsockopt =
+				(sock_setsockopt_fn)hook->kp.addr;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+		else
+			original_sk_setsockopt =
+				(sk_setsockopt_fn)hook->kp.addr;
+#endif
+		pr_info(MODNAME ": redirect kprobe(%s) registered\n",
+			hook->name);
+	}
+
+	WRITE_ONCE(socket_bind_hooks_ready, true);
+	socket_bind_hooks_registered = true;
+	return 0;
+
+fail:
+	pr_warn(MODNAME ": redirect kprobe(%s) failed: %d\n",
+		socket_bind_kprobe_hooks[i].name, ret);
+	unregister_socket_bind_hooks();
+	return ret;
+}
 
 /* ================================================================== */
 /*  Hook 2: sock_ioctl — SIOCGIFCONF interface enumeration            */
@@ -1437,7 +1733,7 @@ static struct kretprobe_reg probes[] = {
 	  false },
 };
 
-/* Bitset of hooks that actually registered — the `status` hooks mask (§4.3). */
+/* Bitset of logical hooks that fully registered — the `status` hooks mask. */
 static u32 installed_hook_mask(void)
 {
 	u32 mask = 0;
@@ -1446,6 +1742,8 @@ static u32 installed_hook_mask(void)
 	for (i = 0; i < ARRAY_SIZE(probes); i++)
 		if (probes[i].registered)
 			mask |= (1u << probes[i].hook_id);
+	if (socket_bind_hooks_registered)
+		mask |= (1u << VPNHIDE_HOOK_SOCKET_BIND_INTERFACE);
 	return mask;
 }
 
@@ -1474,6 +1772,7 @@ static int __init vpnhide_init(void)
 		pr_warn(MODNAME ": only %d/%zu kretprobes registered — "
 				"some detection paths are not covered\n",
 			ok, ARRAY_SIZE(probes));
+	register_socket_bind_hooks();
 
 	/* 0600: root-only read/write. The config snapshot is written here by
 	 * service.sh and the VPN Hide app (both root). Apps must not see the
@@ -1485,6 +1784,7 @@ static int __init vpnhide_init(void)
 		 * target list, so the module would silently filter nothing —
 		 * fail loudly instead of pretending to work. */
 		pr_err(MODNAME ": proc_create(vpnhide_ctl) failed; aborting\n");
+		unregister_socket_bind_hooks();
 		for (i = 0; i < ARRAY_SIZE(probes); i++)
 			if (probes[i].registered)
 				unregister_kretprobe(probes[i].krp);
@@ -1502,6 +1802,7 @@ static void __exit vpnhide_exit(void)
 
 	if (ctl_entry)
 		proc_remove(ctl_entry);
+	unregister_socket_bind_hooks();
 
 	for (i = 0; i < ARRAY_SIZE(probes); i++) {
 		if (probes[i].registered) {

@@ -116,6 +116,27 @@ if [ -z "$GAI" ] && [ -n "${VPNHIDE_GAI_REQUIRED:-}" ]; then
 	exit 2
 fi
 
+# --- state-aware socket binding probe ----------------------------------------
+BIND=""
+if [ -n "${VPNHIDE_BIND_BIN:-}" ] && [ -x "${VPNHIDE_BIND_BIN:-}" ]; then
+	BIND="$VPNHIDE_BIND_BIN"
+	echo "[run-kpm] socket bind probe: prebuilt ($BIND)"
+else
+	BIND_CC="${VPNHIDE_BIND_CC:-$(find "$HOME/Android/Sdk/ndk" -type f -path '*/toolchains/llvm/prebuilt/*/bin/aarch64-linux-android*-clang' 2>/dev/null | sort | tail -1 || true)}"
+	if [ -n "$BIND_CC" ] && [ -x "$BIND_CC" ]; then
+		BIND="$CACHE/bind-probe"
+		"$BIND_CC" -static -O2 -Wall -Wextra -Werror \
+			-o "$BIND" "$HERE/bind-probe.c" 2>/dev/null || BIND=""
+	fi
+	[ -n "$BIND" ] && echo "[run-kpm] socket bind probe built ($(basename "$BIND_CC"))" || \
+		echo "[run-kpm] no bionic toolchain/binary — skipping socket bind vectors"
+fi
+
+if [ -z "$BIND" ] && [ -n "${VPNHIDE_BIND_REQUIRED:-}" ]; then
+	echo "ERROR: socket bind probe is required here (VPNHIDE_BIND_REQUIRED set) but unavailable."
+	exit 2
+fi
+
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -133,6 +154,7 @@ boot_phase() {
 	cp "$HERE/init-kpm.sh" "$rfs/init"
 	chmod +x "$rfs/init"
 	[ -n "$GAI" ] && { cp "$GAI" "$rfs/gai"; chmod +x "$rfs/gai"; }
+	[ -n "$BIND" ] && { cp "$BIND" "$rfs/bind-probe"; chmod +x "$rfs/bind-probe"; }
 	( cd "$rfs" && find . | cpio -o -H newc 2>/dev/null | gzip > "$WORK/initramfs.$tag.gz" )
 
 	echo "[run-kpm] $KMI: booting phase '$tag' (args='${args}')…" >&2
@@ -147,7 +169,10 @@ boot_phase() {
 }
 
 NT_LOG="$(boot_phase "" notarget)"
-TG_LOG="$(boot_phase "0" target)"
+# Keep uid 0 targeted for the existing shell vectors and add uid 5555 for the
+# state-aware bind probe's raw-syscall actor. The legacy load-args grammar is
+# one decimal UID per line (the runtime protocol is a separate channel).
+TG_LOG="$(boot_phase $'0\n5555' target)"
 
 vec_count() { grep -oE "VEC $1=[0-9]+" "$2" | head -1 | grep -oE '[0-9]+$' || echo "-1"; }
 panic_count() { grep -oE 'PANIC=[0-9]+' "$1" | head -1 | grep -oE '[0-9]+$' || echo "1"; }
@@ -165,7 +190,7 @@ keep_mode() {
 
 echo "------------------------- KPM test output -------------------------"
 for log in "$NT_LOG" "$TG_LOG"; do
-	grep -E 'KREL|KPMLOAD|KVER|IPROUTE2|VEC |PANIC' "$log" 2>/dev/null | sed "s|^|[$(basename "$log")] |" || true
+	grep -E 'KREL|KPMLOAD|KVER|IPROUTE2|VEC |BIND_|PANIC' "$log" 2>/dev/null | sed "s|^|[$(basename "$log")] |" || true
 done
 echo "-------------------------------------------------------------------"
 
@@ -173,6 +198,94 @@ echo "-------------------------------------------------------------------"
 [ "$(kpmload "$TG_LOG")" = ok ] || { echo "ERROR: KPM did not load (target boot)"; tail -20 "$TG_LOG"; exit 1; }
 
 PASS=0; FAIL=0
+
+bind_field() {
+	local key="$1" log="$2"
+	sed -n "s/^${key}=//p" "$log" | tr -d '\r' | head -1
+}
+
+check_bind_pair() {
+	local vec="$1" prefix="$2"
+	local nt_errno nt_state tg_errno tg_state
+	nt_errno="$(bind_field "${prefix}_ERRNO" "$NT_LOG")"
+	nt_state="$(bind_field "${prefix}_STATE" "$NT_LOG")"
+	tg_errno="$(bind_field "${prefix}_ERRNO" "$TG_LOG")"
+	tg_state="$(bind_field "${prefix}_STATE" "$TG_LOG")"
+
+	if [ -z "$nt_errno" ] || [ -z "$nt_state" ] || [ -z "$tg_errno" ] || [ -z "$tg_state" ]; then
+		echo "RESULT $vec=SKIP (socket bind probe unavailable)"
+		return
+	fi
+	# SO_BINDTODEVICE needs CAP_NET_RAW on 4.14/4.19/5.4; SO_BINDTOIFINDEX is
+	# absent before 5.4 (ENOPROTOOPT from both set and get). Either native result
+	# already closes this vector, so there is no target A/B distinction to demand.
+	if [ "$nt_errno" -ne 0 ] &&
+		{ [ "$nt_state" -eq 0 ] || [ "$nt_state" -eq "$((-nt_errno))" ]; }; then
+		if [ "$tg_errno" -eq "$nt_errno" ] && [ "$tg_state" -eq "$nt_state" ]; then
+			echo "RESULT $vec=SKIP (identical kernel-native denial/unsupported errno=$nt_errno)"
+			return
+		fi
+		echo "RESULT $vec=FAIL (native result changed: nt_errno=$nt_errno nt_state=$nt_state tg_errno=$tg_errno tg_state=$tg_state)"
+		FAIL=$((FAIL+1))
+		return
+	fi
+	if [ "$nt_errno" -eq 0 ] && [ "$nt_state" -eq 1 ] && \
+		[ "$tg_errno" -eq 19 ] && [ "$tg_state" -eq 0 ]; then
+		echo "RESULT $vec=PASS (notarget=bound target=ENODEV+unbound)"
+		PASS=$((PASS+1))
+	else
+		echo "RESULT $vec=FAIL (nt_errno=$nt_errno nt_state=$nt_state tg_errno=$tg_errno tg_state=$tg_state)"
+		FAIL=$((FAIL+1))
+	fi
+}
+
+check_bind_pair bind_device_raw BIND_NAME_RAW
+check_bind_pair bind_device_nul BIND_NAME_NUL
+check_bind_pair bind_ifindex BIND_INDEX
+
+nt_bad_errno="$(bind_field BIND_BADPTR_ERRNO "$NT_LOG")"
+nt_bad_state="$(bind_field BIND_BADPTR_STATE "$NT_LOG")"
+tg_bad_errno="$(bind_field BIND_BADPTR_ERRNO "$TG_LOG")"
+tg_bad_state="$(bind_field BIND_BADPTR_STATE "$TG_LOG")"
+if [ -z "$nt_bad_errno" ] || [ -z "$nt_bad_state" ] || \
+	[ -z "$tg_bad_errno" ] || [ -z "$tg_bad_state" ]; then
+	echo "RESULT bind_bad_pointer=SKIP (socket bind probe unavailable)"
+elif [ "$nt_bad_errno" -ne 0 ] && [ "$nt_bad_state" -eq 0 ] && \
+	[ "$tg_bad_errno" -ne 0 ] && [ "$tg_bad_state" -eq 0 ]; then
+	echo "RESULT bind_bad_pointer=PASS (safe rejection+unbound)"; PASS=$((PASS+1))
+else
+	echo "RESULT bind_bad_pointer=FAIL (nt_errno=$nt_bad_errno nt_state=$nt_bad_state tg_errno=$tg_bad_errno tg_state=$tg_bad_state)"; FAIL=$((FAIL+1))
+fi
+
+nt_badlen_errno="$(bind_field BIND_BADLEN_ERRNO "$NT_LOG")"
+nt_badlen_state="$(bind_field BIND_BADLEN_STATE "$NT_LOG")"
+tg_badlen_errno="$(bind_field BIND_BADLEN_ERRNO "$TG_LOG")"
+tg_badlen_state="$(bind_field BIND_BADLEN_STATE "$TG_LOG")"
+if [ -z "$nt_badlen_errno" ] || [ -z "$nt_badlen_state" ] || \
+	[ -z "$tg_badlen_errno" ] || [ -z "$tg_badlen_state" ]; then
+	echo "RESULT bind_bad_length=SKIP (socket bind probe unavailable)"
+elif [ "$nt_badlen_errno" -ne 0 ] && [ "$nt_badlen_state" -eq 0 ] && \
+	[ "$tg_badlen_errno" -eq "$nt_badlen_errno" ] && [ "$tg_badlen_state" -eq 0 ]; then
+	echo "RESULT bind_bad_length=PASS (identical native rejection+unbound)"; PASS=$((PASS+1))
+else
+	echo "RESULT bind_bad_length=FAIL (nt_errno=$nt_badlen_errno nt_state=$nt_badlen_state tg_errno=$tg_badlen_errno tg_state=$tg_badlen_state)"; FAIL=$((FAIL+1))
+fi
+
+nt_keep_errno="$(bind_field BIND_KEEP_ERRNO "$NT_LOG")"
+nt_keep_state="$(bind_field BIND_KEEP_STATE "$NT_LOG")"
+tg_keep_errno="$(bind_field BIND_KEEP_ERRNO "$TG_LOG")"
+tg_keep_state="$(bind_field BIND_KEEP_STATE "$TG_LOG")"
+if [ -z "$nt_keep_errno" ] || [ -z "$tg_keep_errno" ]; then
+	echo "RESULT keep_bind_device=SKIP (socket bind probe unavailable)"
+elif [ "$nt_keep_errno" -ne 0 ] && [ "${nt_keep_state:--1}" -eq 0 ] && \
+	[ "$tg_keep_errno" -eq "$nt_keep_errno" ] && [ "${tg_keep_state:--1}" -eq "$nt_keep_state" ]; then
+	echo "RESULT keep_bind_device=SKIP (identical kernel-native CAP_NET_RAW denial)"
+elif [ "$nt_keep_errno" -eq 0 ] && [ "$nt_keep_state" -eq 1 ] && \
+	[ "$tg_keep_errno" -eq 0 ] && [ "$tg_keep_state" -eq 1 ]; then
+	echo "RESULT keep_bind_device=PASS (physical bind preserved)"; PASS=$((PASS+1))
+else
+	echo "RESULT keep_bind_device=FAIL (nt_errno=$nt_keep_errno nt_state=$nt_keep_state tg_errno=$tg_keep_errno tg_state=$tg_keep_state)"; FAIL=$((FAIL+1))
+fi
 for vec in proc_route_v4 getifaddrs proc_route_v6 siocgifconf dev_ioctl netlink_route4 hostroute4 netlink_route6 hostroute6 policy_rule gai_getifaddrs; do
 	# The gai_getifaddrs vector only exists when the bionic probe is available
 	# (baked VPNHIDE_GAI_BIN, or built from an NDK on this host). If neither is

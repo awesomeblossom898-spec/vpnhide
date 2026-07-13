@@ -83,10 +83,13 @@ internal object HookIds {
 
         // __recvfrom_chk() fortified netlink dump filtering
         ZYGISK_RECVFROM_CHK(24, "zygisk_recvfrom_chk", "__recvfrom_chk() fortified netlink dump filtering"),
+
+        // SO_BINDTODEVICE / SO_BINDTOIFINDEX pre-mutation denial
+        SOCKET_BIND_INTERFACE(25, "socket_bind_interface", "SO_BINDTODEVICE / SO_BINDTOIFINDEX pre-mutation denial"),
     }
 
     // Hooks owned by each backend: apply `mask and own`.
-    const val KERNEL_HOOK_MASK = 0x3ff
+    const val KERNEL_HOOK_MASK = 0x20003ff
     const val ZYGISK_HOOK_MASK = 0x1fc0000
     const val LSPOSED_HOOK_MASK = 0x3fc00
 

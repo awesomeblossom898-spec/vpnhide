@@ -32,7 +32,7 @@ kmod/
   ../data/interfaces.toml        # single source of truth (4 languages)
   generated/iface_lists.h        # shared VPN-name matcher  (incl. if<N>, #86)
   shared/vpnhide_logic.h         # shared filtering algorithms (freestanding)
-  vpnhide_kmod.c                 # backend A: kretprobe .ko (unchanged)
+  vpnhide_kmod.c                 # backend A: kretprobes + bind entry redirect
   kpm/
     vpnhide_kpm.c                # backend C: KPM glue (hooks, proc, lifecycle)
     kver_offsets.h               # runtime per-version struct-offset table
@@ -160,11 +160,14 @@ bootloop**, where the `.ko`'s kretprobe would just fail to register. So:
       PoC hooks PASS on android12-5.10**: root sees `vpn0` when not targeted,
       not when targeted; no panic. Validates the inline hooks + the 5.x
       offsets (skb.len=104) + `fargs->local` state passing on a real kernel.
-- [x] **All 10 hooks ported + QEMU-validated** on android12-5.10 (no panic),
+- [x] **All 11 logical hooks ported + QEMU-validated** on android12-5.10 (no panic),
       full native-vector parity with the `.ko`: `fib_route_seq_show`,
       `ipv6_route_seq_show`, `rtnl_fill_ifinfo`, `inet_fill_ifaddr`,
       `inet6_fill_ifaddr`, `dev_ioctl`, `sock_ioctl`, `fib_dump_info` (#86),
-      `rt6_fill_node`, `fib_nl_fill_rule`. The deep-struct ones use 5.10
+      `rt6_fill_node`, `fib_nl_fill_rule`, plus pre-mutation
+      `SO_BINDTODEVICE` / `SO_BINDTOIFINDEX` denial. The bind probe checks the
+      socket's post-call state from another UID, so errno-only masking cannot
+      pass. The deep-struct ones use 5.10
       offsets derived from source (`fib_info`, `fib6_info`, `inet6_ifaddr`,
       `fib_rule`); a static `getifaddrs()` probe (`gai-probe.c`) proves the
       address path is closed (target getifaddrs vpn0: 3 → 0).

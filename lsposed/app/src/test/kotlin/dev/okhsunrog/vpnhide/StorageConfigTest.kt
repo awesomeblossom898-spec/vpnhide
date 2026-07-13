@@ -20,6 +20,7 @@ class StorageConfigTest {
                 "fib_dump_info",
                 "rt6_fill_node",
                 "fib_nl_fill_rule",
+                "socket_bind_interface",
             ),
             NativeKernelHookEntries.map { it.hookName },
         )

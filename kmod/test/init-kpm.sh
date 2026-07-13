@@ -40,6 +40,14 @@ ip -6 addr add fd00:9::1/64 dev vpn0 2>/dev/null
 ip -6 route add fd00:99::/64 dev vpn0 2>/dev/null
 ip rule add uidrange 0-0 table 199 2>/dev/null
 
+# The bind probe's actor runs as uid 5555 and issues a raw setsockopt syscall;
+# a separate non-target observer inspects the same socket afterwards.  The host
+# harness compares these raw fields across the notarget and target boots.
+VPN0_IFINDEX=$(cat /sys/class/net/vpn0/ifindex 2>/dev/null)
+if [ -x /bind-probe ] && [ -n "$VPN0_IFINDEX" ]; then
+	/bind-probe vpn0 "$VPN0_IFINDEX" 2>/dev/null
+fi
+
 # Public /32 + /128 host-routes pinned to the physical uplink (eth0) — the routes
 # a VPN client installs so tunnel packets reach the server. They leak the server's
 # public IP through an RTM_GETROUTE dump even though vpn0 is hidden, so they must

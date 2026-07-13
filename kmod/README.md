@@ -65,8 +65,9 @@ On boot:
 adb shell su -c '/data/adb/modules/vpnhide_kmod/activator'
 
 # Or push a control-config snapshot straight to the kernel (docs/protocol.md):
-# header + folded debug flag + one target line per UID (0x3ff = all hooks).
-adb shell su -c 'printf "vpnhide 1 config\ndebug 0\ntarget 0x28b7 0x3ff\n" > /proc/vpnhide_ctl'
+# header + folded debug flag + one target line per UID
+# (0x20003ff = all current kernel hooks).
+adb shell su -c 'printf "vpnhide 1 config\ndebug 0\ntarget 0x28b7 0x20003ff\n" > /proc/vpnhide_ctl'
 ```
 
 The app writes to **two layers** simultaneously:
@@ -77,7 +78,7 @@ The app writes to **two layers** simultaneously:
 
 For apps with aggressive anti-tamper SDKs, full VPN hiding requires covering both native and Java API detection paths -- without placing any hooks in the target app's process:
 
-- **vpnhide-kmod** (this module) covers the native side: `ioctl`, `getifaddrs()` (netlink), `/proc/net/route`, `/proc/net/ipv6_route`, netlink address enumeration, netlink route dumps, and policy routing rule dumps.
+- **vpnhide-kmod** (this module) covers the native side: `ioctl`, `getifaddrs()` (netlink), `/proc/net/route`, `/proc/net/ipv6_route`, netlink address/route/rule dumps, and pre-mutation `SO_BINDTODEVICE` / `SO_BINDTOIFINDEX` denial.
 - **[lsposed](../lsposed/)** hooks `writeToParcel()` on `NetworkCapabilities`, `NetworkInfo`, `LinkProperties` inside `system_server` -- stripping VPN data before Binder serialization reaches the app.
 
 Together they provide complete VPN hiding without any hooks in the target app's process.

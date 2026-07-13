@@ -212,6 +212,7 @@
     <string name="method_routes">Routing table</string>
     <string name="method_interfaces">Network interfaces</string>
     <string name="method_interface_ioctl">Interface query (ioctl)</string>
+    <string name="method_socket_binding">Socket interface binding</string>
     <string name="method_policy_rules">Routing policy rules</string>
     <string name="method_network_capabilities">NetworkCapabilities</string>
     <string name="method_link_properties">LinkProperties</string>
@@ -223,6 +224,7 @@
     <string name="method_desc_routes">An app reads the routing table (/proc/net/route or netlink). A VPN installs a catch-all default route through its tunnel interface — its presence gives the VPN away.</string>
     <string name="method_desc_interfaces">An app enumerates network interfaces and their addresses (getifaddrs / netlink). A VPN appears as an extra tunNN interface with an address that doesn\'t match Wi-Fi or cellular.</string>
     <string name="method_desc_interface_ioctl">An app queries interfaces directly via ioctl (SIOCGIFCONF / SIOCGIFFLAGS). The VPN tunnel interface shows up in the list or reports as up.</string>
+    <string name="method_desc_socket_binding">An app binds a socket by interface name or index (SO_BINDTODEVICE / SO_BINDTOIFINDEX). Whether the bind succeeds can reveal a hidden VPN interface or route traffic through it.</string>
     <string name="method_desc_policy_rules">An app reads policy routing rules (RTM_GETRULE). A VPN adds rules that steer traffic into the tunnel, which betray its presence.</string>
     <string name="method_desc_network_capabilities">An app queries NetworkCapabilities. An active VPN sets the VPN transport flag — a direct signal that a VPN is up.</string>
     <string name="method_desc_link_properties">An app reads LinkProperties. A VPN exposes its tunNN interface name, VPN routes and DNS servers.</string>

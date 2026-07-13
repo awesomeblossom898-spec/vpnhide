@@ -171,7 +171,7 @@ class StatisticsDataTest {
                     vpnhide 1 status
                     backend 0x0
                     kver 0x6019d
-                    hooks 0x3ff
+                    hooks 0x20003ff
                     error 0x0
                     vpnhide 1 stats
                     0x278b 0x6:0x2 0x63:0x1
@@ -181,7 +181,7 @@ class StatisticsDataTest {
                     vpnhide 1 status
                     backend 0x1
                     kver 0x6019d
-                    hooks 0x3ff
+                    hooks 0x20003ff
                     error 0x0
                     vpnhide 1 stats
                     0x27fa 0x0:0x5

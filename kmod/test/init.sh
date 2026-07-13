@@ -33,11 +33,11 @@ REGISTERED=$(dmesg | grep -c 'vpnhide:.*registered')
 echo "REGISTERED=$REGISTERED"
 
 # Write a control-protocol config snapshot (docs/protocol.md) enabling every
-# kernel hook (mask 0x3ff) for a single UID, with debug logging on. Replaces
+# kernel hook (mask 0x20003ff) for a single UID, with debug logging on. Replaces
 # the old `echo <uid> > /proc/vpnhide_targets` + `echo 1 > /proc/vpnhide_debug`
 # — both folded into the one /proc/vpnhide_ctl node.
 set_target() {
-	printf 'vpnhide 1 config\ndebug 1\ntarget 0x%x 0x3ff\n' "$1" \
+	printf 'vpnhide 1 config\ndebug 1\ntarget 0x%x 0x20003ff\n' "$1" \
 		> /proc/vpnhide_ctl 2>/dev/null
 }
 
@@ -190,6 +190,115 @@ check_ifconf_size() {
 	fi
 }
 
+bind_field() {
+	_output=$1
+	_key=$2
+	printf '%s\n' "$_output" | sed -n "s/^${_key}=//p" | head -1
+}
+
+# A return code is not enough for a bind-denial test: a return-only kretprobe
+# can report ENODEV after the kernel has already set sk_bound_dev_if.  The
+# native probe has a target child perform a raw syscall and a non-target child
+# inspect the same socket afterwards.
+check_socket_bind() {
+	if [ ! -x /bind-probe ]; then
+		for _vec in bind_device_raw bind_device_nul bind_bad_pointer bind_bad_length bind_ifindex keep_bind_device; do
+			echo "RESULT $_vec=SKIP (no socket bind probe available)"
+		done
+		return
+	fi
+
+	_vpn_ifindex=$(cat /sys/class/net/vpn0/ifindex 2>/dev/null)
+	if [ -z "$_vpn_ifindex" ]; then
+		for _vec in bind_device_raw bind_device_nul bind_bad_pointer bind_bad_length bind_ifindex keep_bind_device; do
+			echo "RESULT $_vec=FAIL (vpn0 ifindex unavailable)"
+			FAIL=$((FAIL + 1))
+		done
+		return
+	fi
+
+	# The probe actor is uid 5555.  First make it a non-target, then target it.
+	set_target 0
+	_nt=$(/bind-probe vpn0 "$_vpn_ifindex" 2>/dev/null)
+	set_target 5555
+	_tg=$(/bind-probe vpn0 "$_vpn_ifindex" 2>/dev/null)
+
+	for _case in \
+		"bind_device_raw BIND_NAME_RAW" \
+		"bind_device_nul BIND_NAME_NUL" \
+		"bind_ifindex BIND_INDEX"; do
+		_vec=${_case%% *}
+		_prefix=${_case#* }
+		_nt_errno=$(bind_field "$_nt" "${_prefix}_ERRNO")
+		_nt_state=$(bind_field "$_nt" "${_prefix}_STATE")
+		_tg_errno=$(bind_field "$_tg" "${_prefix}_ERRNO")
+		_tg_state=$(bind_field "$_tg" "${_prefix}_STATE")
+		[ -n "$_nt_errno" ] || _nt_errno=-1
+		[ -n "$_nt_state" ] || _nt_state=-1
+		[ -n "$_tg_errno" ] || _tg_errno=-1
+		[ -n "$_tg_state" ] || _tg_state=-1
+		if [ "$_nt_errno" -eq 0 ] && [ "$_nt_state" -eq 1 ] && \
+			[ "$_tg_errno" -eq 19 ] && [ "$_tg_state" -eq 0 ]; then
+			echo "RESULT $_vec=PASS (notarget=bound target=ENODEV+unbound)"
+			PASS=$((PASS + 1))
+		else
+			echo "RESULT $_vec=FAIL (nt_errno=$_nt_errno nt_state=$_nt_state tg_errno=$_tg_errno tg_state=$_tg_state)"
+			FAIL=$((FAIL + 1))
+		fi
+	done
+
+	_nt_errno=$(bind_field "$_nt" BIND_BADPTR_ERRNO)
+	_nt_state=$(bind_field "$_nt" BIND_BADPTR_STATE)
+	_tg_errno=$(bind_field "$_tg" BIND_BADPTR_ERRNO)
+	_tg_state=$(bind_field "$_tg" BIND_BADPTR_STATE)
+	[ -n "$_nt_errno" ] || _nt_errno=-1
+	[ -n "$_nt_state" ] || _nt_state=-1
+	[ -n "$_tg_errno" ] || _tg_errno=-1
+	[ -n "$_tg_state" ] || _tg_state=-1
+	if [ "$_nt_errno" -eq 14 ] && [ "$_nt_state" -eq 0 ] && \
+		[ "$_tg_errno" -eq 14 ] && [ "$_tg_state" -eq 0 ]; then
+		echo "RESULT bind_bad_pointer=PASS (EFAULT+unbound)"
+		PASS=$((PASS + 1))
+	else
+		echo "RESULT bind_bad_pointer=FAIL (nt_errno=$_nt_errno nt_state=$_nt_state tg_errno=$_tg_errno tg_state=$_tg_state)"
+		FAIL=$((FAIL + 1))
+	fi
+
+	_nt_errno=$(bind_field "$_nt" BIND_BADLEN_ERRNO)
+	_nt_state=$(bind_field "$_nt" BIND_BADLEN_STATE)
+	_tg_errno=$(bind_field "$_tg" BIND_BADLEN_ERRNO)
+	_tg_state=$(bind_field "$_tg" BIND_BADLEN_STATE)
+	[ -n "$_nt_errno" ] || _nt_errno=-1
+	[ -n "$_nt_state" ] || _nt_state=-1
+	[ -n "$_tg_errno" ] || _tg_errno=-1
+	[ -n "$_tg_state" ] || _tg_state=-1
+	if [ "$_nt_errno" -eq 22 ] && [ "$_nt_state" -eq 0 ] && \
+		[ "$_tg_errno" -eq 22 ] && [ "$_tg_state" -eq 0 ]; then
+		echo "RESULT bind_bad_length=PASS (EINVAL+unbound)"
+		PASS=$((PASS + 1))
+	else
+		echo "RESULT bind_bad_length=FAIL (nt_errno=$_nt_errno nt_state=$_nt_state tg_errno=$_tg_errno tg_state=$_tg_state)"
+		FAIL=$((FAIL + 1))
+	fi
+
+	_nt_errno=$(bind_field "$_nt" BIND_KEEP_ERRNO)
+	_nt_state=$(bind_field "$_nt" BIND_KEEP_STATE)
+	_tg_errno=$(bind_field "$_tg" BIND_KEEP_ERRNO)
+	_tg_state=$(bind_field "$_tg" BIND_KEEP_STATE)
+	[ -n "$_nt_errno" ] || _nt_errno=-1
+	[ -n "$_nt_state" ] || _nt_state=-1
+	[ -n "$_tg_errno" ] || _tg_errno=-1
+	[ -n "$_tg_state" ] || _tg_state=-1
+	if [ "$_nt_errno" -eq 0 ] && [ "$_nt_state" -eq 1 ] && \
+		[ "$_tg_errno" -eq 0 ] && [ "$_tg_state" -eq 1 ]; then
+		echo "RESULT keep_bind_device=PASS (physical bind preserved)"
+		PASS=$((PASS + 1))
+	else
+		echo "RESULT keep_bind_device=FAIL (nt_errno=$_nt_errno nt_state=$_nt_state tg_errno=$_tg_errno tg_state=$_tg_state)"
+		FAIL=$((FAIL + 1))
+	fi
+}
+
 # vector -> hook it exercises
 check_hide getifaddrs      "ip addr show"                 "vpn0"   # rtnl_fill_ifinfo + inet*_fill_ifaddr
 check_hide siocgifconf     "ifconfig -a"                  "vpn0"   # sock_ioctl
@@ -203,6 +312,7 @@ check_hide hostroute6      "ip -6 route show table all"   "2001:4860" # rt6_fill
 check_hide policy_rule     "ip rule show"                 "199"    # fib_nl_fill_rule
 check_gai
 check_ifconf_size                                                  # sock_ioctl size-query
+check_socket_bind                                                  # interface socket binding
 
 # Non-VPN entries must survive target filtering. This catches over-trimming
 # regressions where a hook hides the whole dump instead of only vpn0 rows.
@@ -212,6 +322,62 @@ check_keep_exact keep_siocgifconf     "ifconfig -a"             "^eth0"
 check_keep_exact keep_dev_ioctl       "ifconfig eth0"           "^eth0"
 check_keep keep_netlink_route4  "ip route show table all" "dev eth0"
 check_keep_exact keep_policy_rule     "ip rule show"            "lookup main"
+
+# Entry-kprobe redirection continues outside the exception handler. Stress an
+# unload while target bind calls are in flight; the module must unregister the
+# entry probes and drain those redirected task paths before its text is freed.
+_bind_pids=""
+if [ -x /bind-probe ] && [ -n "$_vpn_ifindex" ]; then
+	set_target 5555
+	for _worker in 1 2 3 4; do
+		(
+			while /bind-probe vpn0 "$_vpn_ifindex" >/dev/null 2>&1; do :; done
+		) &
+		_bind_pids="$_bind_pids $!"
+	done
+	sleep 1
+fi
+_unload_attempt=1
+_unload_ok=0
+_rmmod_error=""
+while [ "$_unload_attempt" -le 50 ]; do
+	if rmmod vpnhide_kmod >/tmp/vpnhide-rmmod.log 2>&1; then
+		_unload_ok=1
+		break
+	fi
+	_rmmod_error=$(tr '\n' ' ' </tmp/vpnhide-rmmod.log)
+	case "$_rmmod_error" in
+		*"Resource busy"*|*"temporarily unavailable"*) ;;
+		*) break ;;
+	esac
+	_unload_attempt=$((_unload_attempt + 1))
+done
+if [ "$_unload_ok" -eq 1 ]; then
+	echo "RESULT unload=PASS (redirected paths drained; attempts=$_unload_attempt)"
+	PASS=$((PASS + 1))
+else
+	_module_refcnt=$(cat /sys/module/vpnhide_kmod/refcnt 2>/dev/null || echo unavailable)
+	_module_state=$(cat /sys/module/vpnhide_kmod/initstate 2>/dev/null || echo unavailable)
+	_module_holders=""
+	for _holder in /sys/module/vpnhide_kmod/holders/*; do
+		[ -e "$_holder" ] || continue
+		_module_holders="$_module_holders $(basename "$_holder")"
+	done
+	echo "RESULT unload=FAIL (attempts=$_unload_attempt refcnt=$_module_refcnt state=$_module_state holders=${_module_holders:-none}; ${_rmmod_error:-no rmmod diagnostic})"
+	FAIL=$((FAIL + 1))
+fi
+for _pid in $_bind_pids; do
+	kill "$_pid" 2>/dev/null
+	wait "$_pid" 2>/dev/null
+done
+if [ "$_unload_ok" -eq 0 ]; then
+	if rmmod vpnhide_kmod >/tmp/vpnhide-rmmod-after-stop.log 2>&1; then
+		echo "UNLOAD_AFTER_WORKERS_STOP=PASS"
+	else
+		_rmmod_after_stop=$(tr '\n' ' ' </tmp/vpnhide-rmmod-after-stop.log)
+		echo "UNLOAD_AFTER_WORKERS_STOP=FAIL (${_rmmod_after_stop:-no rmmod diagnostic})"
+	fi
+fi
 
 PANIC=$(dmesg | grep -ci 'Unable to handle\|Internal error\|Oops\|BUG:\|Kernel panic')
 echo "PANIC=$PANIC"

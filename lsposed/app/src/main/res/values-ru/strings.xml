@@ -182,6 +182,7 @@
     <string name="method_routes">Таблица маршрутов</string>
     <string name="method_interfaces">Сетевые интерфейсы</string>
     <string name="method_interface_ioctl">Запрос интерфейсов (ioctl)</string>
+    <string name="method_socket_binding">Привязка сокета к интерфейсу</string>
     <string name="method_policy_rules">Правила маршрутизации</string>
     <string name="method_network_capabilities">NetworkCapabilities</string>
     <string name="method_link_properties">LinkProperties</string>
@@ -193,6 +194,7 @@
     <string name="method_desc_routes">Приложение читает таблицу маршрутов (/proc/net/route или netlink). VPN добавляет маршрут по умолчанию через свой туннельный интерфейс — его наличие выдаёт VPN.</string>
     <string name="method_desc_interfaces">Приложение перечисляет сетевые интерфейсы и их адреса (getifaddrs / netlink). VPN виден как лишний интерфейс tunNN с адресом, не совпадающим с Wi-Fi или мобильной сетью.</string>
     <string name="method_desc_interface_ioctl">Приложение запрашивает интерфейсы напрямую через ioctl (SIOCGIFCONF / SIOCGIFFLAGS). Туннельный интерфейс VPN появляется в списке или отмечается как активный.</string>
+    <string name="method_desc_socket_binding">Приложение привязывает сокет по имени или индексу интерфейса (SO_BINDTODEVICE / SO_BINDTOIFINDEX). Успех привязки может выдать скрытый VPN-интерфейс или направить через него трафик.</string>
     <string name="method_desc_policy_rules">Приложение читает правила маршрутизации (RTM_GETRULE). VPN добавляет правила, направляющие трафик в туннель, — они его выдают.</string>
     <string name="method_desc_network_capabilities">Приложение запрашивает NetworkCapabilities. Активный VPN выставляет флаг VPN-транспорта — прямой признак включённого VPN.</string>
     <string name="method_desc_link_properties">Приложение читает LinkProperties. VPN раскрывает имя своего интерфейса tunNN, VPN-маршруты и DNS-серверы.</string>

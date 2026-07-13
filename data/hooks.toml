@@ -172,6 +172,14 @@ name = "zygisk_recvfrom_chk"
 backend = "zygisk"
 note = "__recvfrom_chk() fortified netlink dump filtering"
 
+# Added after the original backend ranges were assigned. The registry is
+# append-only, so this kernel hook deliberately lives after the Zygisk ids.
+[[hook]]
+id = 25
+name = "socket_bind_interface"
+backend = "kernel"
+note = "SO_BINDTODEVICE / SO_BINDTOIFINDEX pre-mutation denial"
+
 # --- backend ids (protocol §4.3 `status backend <id>`) ----------------------
 # Which backend answered a `status` read. Distinct from the hook `backend`
 # field above (.ko and KPM both own "kernel" hooks but are separate backends).

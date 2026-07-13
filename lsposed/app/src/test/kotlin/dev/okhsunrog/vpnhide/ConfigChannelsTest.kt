@@ -13,13 +13,13 @@ class ConfigChannelsTest {
             """
             vpnhide 1 config
             debug 0
-            target 0x2711 0x3ff
-            target 0x27fa 0x3ff
+            target 0x2711 0x20003ff
+            target 0x27fa 0x20003ff
             """.trimIndent() + "\n",
             wire,
         )
         // The mask is exactly the generated kernel hook mask.
-        assertEquals("0x${HookIds.KERNEL_HOOK_MASK.toString(16)}", "0x3ff")
+        assertEquals("0x${HookIds.KERNEL_HOOK_MASK.toString(16)}", "0x20003ff")
     }
 
     @Test

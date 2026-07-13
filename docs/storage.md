@@ -264,7 +264,7 @@ A common confusion (they are *not* the same):
 - **`status`: `hooks <mask>`** — per-backend, what is *actually installed*: did all
   the backend's hooks register this boot? It is capability/health, not per-target.
   Lets the app show "requested vs active" and detect a partial install
-  (`error = partial_hooks`). So `hooks 0x3ff` in a status read means "all 10 kernel
+  (`error = partial_hooks`). So `hooks 0x20003ff` in a status read means "all 11 kernel
   hooks are installed in this backend", **not** "this target's hooks".
 
 ### 5.2 Config and stats don't collide
@@ -275,7 +275,7 @@ emits status+stats (from separate counters). Example on the kmod node:
 
 ```sh
 # write config (kind=config) — kernel parses into targets[]+debug, nothing echoed
-# printf 'vpnhide 1 config\ndebug 0\ntarget 0x27fa 0x3ff\n' > /proc/vpnhide_ctl
+# printf 'vpnhide 1 config\ndebug 0\ntarget 0x27fa 0x20003ff\n' > /proc/vpnhide_ctl
 
 # read status+stats (kind=status, kind=stats) — never returns the config you wrote
 # cat /proc/vpnhide_ctl
@@ -283,7 +283,7 @@ emits status+stats (from separate counters). Example on the kmod node:
 vpnhide 1 status
 backend 0x0
 kver 0x6019d
-hooks 0x3ff
+hooks 0x20003ff
 error 0x0
 vpnhide 1 stats
 0x27fa 0x0:0x5 0x3:0xc 0x9:0x1

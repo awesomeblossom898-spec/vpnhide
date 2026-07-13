@@ -296,6 +296,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     env:
       KMI: ${{ matrix.kmi }}
+      VPNHIDE_BIND_REQUIRED: "1"
 
     steps:
       - uses: actions/checkout@v7
@@ -355,6 +356,7 @@ jobs:
         # image, so a skip means it's missing — fail rather than drop coverage.
         env:
           VPNHIDE_GAI_REQUIRED: "1"
+          VPNHIDE_BIND_REQUIRED: "1"
         run: |
           CLANG_BIN="$(ls -d /opt/ddk/clang/*/bin | head -1)"
           make -C kmod kpm CLANG_DIR="$CLANG_BIN"
@@ -394,6 +396,7 @@ jobs:
         # image, so a skip means it's missing — fail rather than drop coverage.
         env:
           VPNHIDE_GAI_REQUIRED: "1"
+          VPNHIDE_BIND_REQUIRED: "1"
         run: |
           make -C kmod kpm
           VPNHIDE_QEMU_IMAGE="/opt/qemu/legacy/${{ matrix.ver }}/Image" \

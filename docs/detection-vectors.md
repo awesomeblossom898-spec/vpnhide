@@ -41,7 +41,7 @@ Coverage comes from vpnhide components plus the platform. They differ in
 
 | Layer | Where it runs | Selects targets by | Sees | Bypassable by raw syscalls? |
 |---|---|---|---|---|
-| **kmod** | Linux kernel (kretprobes) | **UID** (`/proc/vpnhide_ctl`) | Everything below libc — the syscall/skb/seq_file source | **No** — filters at the source regardless of how userspace calls |
+| **kmod** | Linux kernel (kretprobes + entry redirection) | **UID** (`/proc/vpnhide_ctl`) | Everything below libc — the syscall/socket/skb/seq_file source | **No** — filters at the source regardless of how userspace calls |
 | **KPM** | Linux kernel (KernelPatch inline hooks) | **UID** (KPM `ctl0` supercall) | Same kernel sources as kmod, delivered through KernelPatch instead of `.ko` loading | **No** — filters at the source regardless of how userspace calls |
 | **zygisk** | target process, inline `libc` hooks (shadowhook) | **package** (canonical JSON -> module-dir runtime wire, per-fork) | Only calls routed through the hooked `libc` symbols | **Yes** — a direct `svc #0` / unhooked libc entry slips past |
 | **lsposed** | `system_server`, Binder hooks (Vector framework) | **package/appId** (`vpnhide_config.json` + `/data/system/packages.list`) | Java/framework Binder results *before* serialization to the app | N/A — the data is built in another process; the app only gets the sanitized parcel |
@@ -186,12 +186,31 @@ cheap and correct when such a route is present; see issue discussion.
 
 | Vector | How it manifests | kmod | KPM | Zygisk | lsposed | SELinux |
 |---|---|:--:|:--:|:--:|:--:|:--:|
+| `setsockopt(SO_BINDTODEVICE)` / `SO_BINDTOIFINDEX` | bind success and `getsockopt` state reveal or select a hidden iface | ✅ pre-mutation entry redirect | ✅ pre-hook `skip_origin` | — | — | |
 | `/proc/net/tcp` | local addr hex per socket | — | — | ✅ `filter_tcp4_buf` (by VPN addr) | — | 🔒 often denied |
 | `/proc/net/tcp6` | 32-hex local addr | — | — | ✅ `filter_tcp6_buf` | — | 🔒 |
 | `/proc/net/if_inet6` | IPv6 addrs, iface last field | — | — | ✅ `filter_if_inet6_buf` | — | 🔒 |
 
-These three are **Zygisk-only** today: kernel backends hide IPv6 addresses on
-the netlink `RTM_GETADDR` path but do **not** hook `if_inet6_seq_show`,
+Since Linux 5.7, an unprivileged process can perform the first interface
+bind, so `curl --interface tun0 ...` or a raw `setsockopt` syscall is a real
+local oracle even without root. The kernel backends deny VPN names and indices
+with `ENODEV` **before** `sk_bound_dev_if` changes. The `.ko` redirects
+`sock_setsockopt` (and `sk_setsockopt` on 6.1+) to a typed wrapper because a
+return-only kretprobe would be too late; KPM uses KernelPatch's pre-hook
+`skip_origin`. Both freeze the 5.9+ `sockptr_t` input before validation to close
+userspace TOCTOU. On 5.7-5.8, KPM instead hooks the resolved-ifindex mutation
+helper; if LTO removes that static symbol, status is deliberately partial.
+Before 5.7, the kernel itself rejects the first interface bind without
+`CAP_NET_RAW`, and KPM preserves that native result exactly rather than adding
+a distinguishable errno. 4.x also lacks `SO_BINDTOIFINDEX`. The legacy QEMU
+checks record these paths as native protection.
+
+This vector is deliberately tested by a raw `svc` probe. A second, non-target
+UID inspects the same inherited socket after the target call, so a backend that
+only rewrites errno while leaving the socket bound fails the test.
+
+The three procfs rows remain **Zygisk-only** today: kernel backends hide IPv6
+addresses on the netlink `RTM_GETADDR` path but do **not** hook `if_inet6_seq_show`,
 `tcp4_seq_show`, or `tcp6_seq_show`, so the procfs equivalents leak under a
 raw-syscall reader that SELinux happens to allow. Candidate kernel-backend work
 if a real detector uses them.
@@ -235,7 +254,7 @@ being hidden from other observer apps.
 Rough priority when triaging "which vector matters", based on what real
 detectors actually probe:
 
-1. **Interface enumeration + route dump (3A, 3B).** The first thing every native
+1. **Interface enumeration + route dump + interface bind (3A–3C).** The first thing every native
    detector checks. Must be airtight across libc *and* raw-syscall readers →
    needs a kernel backend (`.ko` or KPM) for the bypass-proof guarantee, Zygisk
    for kernel-backend-less installs.
@@ -255,6 +274,9 @@ detectors actually probe:
 - **Raw-syscall native readers defeat Zygisk.** Only the kernel backends
   (`.ko`/KPM) are bypass-proof. Document any "covered" claim with the layer; a
   Zygisk-only install is not raw-syscall-proof.
+- **Zygisk does not intercept socket interface binding.** Its libc hooks do not
+  cover `SO_BINDTODEVICE` / `SO_BINDTOIFINDEX`, and a direct syscall would bypass
+  an in-process libc hook anyway. Use a kernel backend for this vector.
 - **zygisk netlink filtering is recv-family-scoped.** It hooks `recvmsg`,
   `recv`, `recvfrom`, `__recvfrom_chk`. A detector reading a netlink socket via
   plain `read()`/`readv()` or `recvmmsg` would slip past. Not seen in the wild
@@ -280,7 +302,7 @@ detectors actually probe:
 
 | Layer | Entry points |
 |---|---|
-| kmod | `kmod/vpnhide_kmod.c` (10 kretprobes); iface matcher `kmod/generated/iface_lists.h` |
+| kmod | `kmod/vpnhide_kmod.c` (10 kretprobes + the socket-bind entry redirect); iface matcher `kmod/generated/iface_lists.h` |
 | KPM | `kmod/kpm/vpnhide_kpm.c` (KernelPatch inline hooks + ctl0); offsets in `kmod/kpm/kver_offsets.h` |
 | zygisk | `zygisk/src/hooks.rs` (ioctl/getifaddrs/openat/recv*); `zygisk/src/filter.rs` (procfs + netlink filters) |
 | lsposed | `lsposed/app/.../HookEntry.kt`, `PackageVisibilityHooks.kt`; iface matcher `.../generated/IfaceLists.kt` |
