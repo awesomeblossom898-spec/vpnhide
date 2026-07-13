@@ -186,7 +186,7 @@ cheap and correct when such a route is present; see issue discussion.
 
 | Vector | How it manifests | kmod | KPM | Zygisk | lsposed | SELinux |
 |---|---|:--:|:--:|:--:|:--:|:--:|
-| `setsockopt(SO_BINDTODEVICE)` / `SO_BINDTOIFINDEX` | bind success and `getsockopt` state reveal or select a hidden iface | ✅ pre-mutation entry redirect | ✅ pre-hook `skip_origin` | — | — | |
+| `setsockopt(SO_BINDTODEVICE)` / `SO_BINDTOIFINDEX` | bind success and `getsockopt` state reveal or select a hidden iface | ✅ pre-mutation entry redirect | ✅ pre-hook `skip_origin` | ⚠️ bionic `setsockopt` only | — | |
 | `/proc/net/tcp` | local addr hex per socket | — | — | ✅ `filter_tcp4_buf` (by VPN addr) | — | 🔒 often denied |
 | `/proc/net/tcp6` | 32-hex local addr | — | — | ✅ `filter_tcp6_buf` | — | 🔒 |
 | `/proc/net/if_inet6` | IPv6 addrs, iface last field | — | — | ✅ `filter_if_inet6_buf` | — | 🔒 |
@@ -204,6 +204,16 @@ Before 5.7, the kernel itself rejects the first interface bind without
 `CAP_NET_RAW`, and KPM preserves that native result exactly rather than adding
 a distinguishable errno. 4.x also lacks `SO_BINDTOIFINDEX`. The legacy QEMU
 checks record these paths as native protection.
+
+When neither kernel backend is available, Zygisk inline-hooks bionic's
+`setsockopt` entry point and applies the same pre-syscall `ENODEV` policy. It
+copies the untrusted option value through a fault-contained self-read, so a bad
+pointer still reaches the kernel for native `EFAULT` handling instead of
+crashing the target process. This is deliberately **best effort**: a caller
+issuing `__NR_setsockopt` through raw `svc #0` never enters bionic and bypasses
+the hook. On pre-5.7 kernels it stays inert because the kernel rejects an
+unprivileged bind before inspecting the name; returning a name-dependent error
+there would create a new oracle.
 
 This vector is deliberately tested by a raw `svc` probe. A second, non-target
 UID inspects the same inherited socket after the target call, so a backend that
@@ -274,9 +284,10 @@ detectors actually probe:
 - **Raw-syscall native readers defeat Zygisk.** Only the kernel backends
   (`.ko`/KPM) are bypass-proof. Document any "covered" claim with the layer; a
   Zygisk-only install is not raw-syscall-proof.
-- **Zygisk does not intercept socket interface binding.** Its libc hooks do not
-  cover `SO_BINDTODEVICE` / `SO_BINDTOIFINDEX`, and a direct syscall would bypass
-  an in-process libc hook anyway. Use a kernel backend for this vector.
+- **Zygisk socket-interface binding coverage is libc-only.** Its `setsockopt`
+  hook covers bionic-routed `SO_BINDTODEVICE` / `SO_BINDTOIFINDEX` calls, but a
+  direct syscall bypasses any in-process libc hook. Use a kernel backend for a
+  bypass-proof guarantee.
 - **zygisk netlink filtering is recv-family-scoped.** It hooks `recvmsg`,
   `recv`, `recvfrom`, `__recvfrom_chk`. A detector reading a netlink socket via
   plain `read()`/`readv()` or `recvmmsg` would slip past. Not seen in the wild

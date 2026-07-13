@@ -91,9 +91,9 @@ use zygisk_api::jni::JNIEnv;
 
 use crate::hooks::{
     hooked_getifaddrs, hooked_ioctl, hooked_openat, hooked_recv, hooked_recvfrom,
-    hooked_recvfrom_chk, hooked_recvmsg, set_real_getifaddrs_ptr, set_real_ioctl_ptr,
-    set_real_openat_ptr, set_real_recv_ptr, set_real_recvfrom_chk_ptr, set_real_recvfrom_ptr,
-    set_real_recvmsg_ptr,
+    hooked_recvfrom_chk, hooked_recvmsg, hooked_setsockopt, set_real_getifaddrs_ptr,
+    set_real_ioctl_ptr, set_real_openat_ptr, set_real_recv_ptr, set_real_recvfrom_chk_ptr,
+    set_real_recvfrom_ptr, set_real_recvmsg_ptr, set_real_setsockopt_ptr,
 };
 
 const LOG_TAG: &str = "vpnhide-zygisk";
@@ -360,6 +360,8 @@ fn mark_cleanup(api: &mut ZygiskApi<'_, V2>) {
 ///     inside libcore, by the Dart VM's
 ///     `NetworkInterface.list()`, and by anything in C/C++
 ///     that calls `getifaddrs()` directly.
+///   * `setsockopt` — denies libc-routed `SO_BINDTODEVICE` /
+///     `SO_BINDTOIFINDEX` attempts for VPN interfaces before the syscall.
 ///   * `openat` — intercepts opens of `/proc/net/{route,ipv6_route,
 ///     if_inet6,tcp,tcp6}`; returns a `memfd` with VPN
 ///     entries stripped out.
@@ -403,6 +405,12 @@ fn install_hooks(hookmask: u32) -> Result<(), String> {
             hook_id: Hook::ZygiskGetifaddrs,
             replacement: hooked_getifaddrs as *mut _,
             store_orig: set_real_getifaddrs_ptr,
+        },
+        HookDesc {
+            sym: c"setsockopt",
+            hook_id: Hook::ZygiskSetsockopt,
+            replacement: hooked_setsockopt as *mut _,
+            store_orig: set_real_setsockopt_ptr,
         },
         HookDesc {
             sym: c"openat",

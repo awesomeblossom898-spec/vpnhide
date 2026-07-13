@@ -49,7 +49,9 @@ internal enum class DetectionMethod(
 
                 HookIds.Hook.FIB_NL_FILL_RULE -> PolicyRules
 
-                HookIds.Hook.SOCKET_BIND_INTERFACE -> SocketBinding
+                HookIds.Hook.SOCKET_BIND_INTERFACE,
+                HookIds.Hook.ZYGISK_SETSOCKOPT,
+                -> SocketBinding
 
                 HookIds.Hook.LSPOSED_NETWORK_CAPABILITIES -> NetworkCapabilities
 

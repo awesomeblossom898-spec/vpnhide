@@ -58,13 +58,15 @@ pub enum Hook {
     ZygiskRecvfromChk = 24,
     /// SO_BINDTODEVICE / SO_BINDTOIFINDEX pre-mutation denial
     SocketBindInterface = 25,
+    /// libc setsockopt() best-effort socket-interface bind denial
+    ZygiskSetsockopt = 26,
 }
 
-pub const HOOK_COUNT: u32 = 26;
+pub const HOOK_COUNT: u32 = 27;
 
 /// Hooks owned by each backend: apply `mask & own`.
 pub const KERNEL_HOOK_MASK: u32 = 0x20003ff;
-pub const ZYGISK_HOOK_MASK: u32 = 0x1fc0000;
+pub const ZYGISK_HOOK_MASK: u32 = 0x5fc0000;
 pub const LSPOSED_HOOK_MASK: u32 = 0x3fc00;
 
 /// status error codes (protocol §5.1).
@@ -97,7 +99,7 @@ pub enum Backend {
     Lsposed = 3,
 }
 
-pub const HOOK_NAMES: [&str; 26] = [
+pub const HOOK_NAMES: [&str; 27] = [
     "fib_route_seq_show",
     "ipv6_route_seq_show",
     "rtnl_fill_ifinfo",
@@ -124,4 +126,5 @@ pub const HOOK_NAMES: [&str; 26] = [
     "zygisk_recvfrom",
     "zygisk_recvfrom_chk",
     "socket_bind_interface",
+    "zygisk_setsockopt",
 ];

@@ -33,6 +33,7 @@ class StorageConfigTest {
                 "zygisk_recv",
                 "zygisk_recvfrom",
                 "zygisk_recvfrom_chk",
+                "zygisk_setsockopt",
             ),
             ZygiskNativeHookEntries.map { it.hookName },
         )

@@ -24,7 +24,7 @@
 
 use core::cell::{Cell, RefCell};
 use core::ffi::{c_int, c_void};
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use libc::{SIOCGIFCONF, SIOCGIFNAME, ifreq};
 
@@ -84,15 +84,28 @@ fn is_netlink_fd(fd: c_int) -> bool {
 
 // Android bionic exposes the thread-local errno via `int *__errno()`.
 // The `libc` crate doesn't re-export this symbol for android targets,
-// so declare it ourselves. Matches bionic's prototype exactly.
+// so declare it ourselves. Matches bionic's prototype exactly. Host unit
+// tests use glibc's equivalent entry point.
+#[cfg(target_os = "android")]
 unsafe extern "C" {
     fn __errno() -> *mut c_int;
 }
 
+#[cfg(all(not(target_os = "android"), target_os = "linux"))]
+unsafe extern "C" {
+    fn __errno_location() -> *mut c_int;
+}
+
 #[inline(always)]
 fn set_errno(val: c_int) {
+    #[cfg(target_os = "android")]
     unsafe {
         *__errno() = val;
+    }
+
+    #[cfg(all(not(target_os = "android"), target_os = "linux"))]
+    unsafe {
+        *__errno_location() = val;
     }
 }
 
@@ -104,7 +117,7 @@ fn set_errno(val: c_int) {
 ///
 /// Each hook needs the same four items to call through to the function it
 /// replaced, so we generate them from one declaration instead of hand-copying
-/// the block seven times:
+/// the block eight times:
 ///   - `static $slot: AtomicPtr<c_void>` — the captured original pointer,
 ///   - `type $ty` — its function-pointer shape (doc comments carry through),
 ///   - `fn $getter() -> Option<$ty>` — None before install or if somehow null,
@@ -152,6 +165,286 @@ saved_original! {
     static REAL_IOCTL;
     fn real_ioctl;
     pub fn set_real_ioctl_ptr;
+}
+
+saved_original! {
+    /// Raw function type for `setsockopt`.
+    type SetsockoptFn = unsafe extern "C" fn(
+        c_int,
+        c_int,
+        c_int,
+        *const c_void,
+        libc::socklen_t,
+    ) -> c_int;
+    static REAL_SETSOCKOPT;
+    fn real_setsockopt;
+    pub fn set_real_setsockopt_ptr;
+}
+
+// Android's UAPI has exposed SO_BINDTOIFINDEX since Linux 5.7, but the libc
+// crate intentionally follows the portable libc surface and does not define
+// it. Keep the kernel ABI value local to this hook.
+const SO_BINDTOIFINDEX: c_int = 62;
+
+const KERNEL_BIND_POLICY_UNKNOWN: u8 = 0;
+const KERNEL_BIND_POLICY_NATIVE_ONLY: u8 = 1;
+const KERNEL_BIND_POLICY_HOOK: u8 = 2;
+static KERNEL_BIND_POLICY: AtomicU8 = AtomicU8::new(KERNEL_BIND_POLICY_UNKNOWN);
+
+fn parse_decimal_component(input: &[u8], cursor: &mut usize) -> Option<u32> {
+    let start = *cursor;
+    let mut value = 0u32;
+    while let Some(&byte) = input.get(*cursor) {
+        if !byte.is_ascii_digit() {
+            break;
+        }
+        value = value.checked_mul(10)?.checked_add(u32::from(byte - b'0'))?;
+        *cursor += 1;
+    }
+    (*cursor > start).then_some(value)
+}
+
+fn release_has_unprivileged_first_bind(release: &[u8]) -> bool {
+    let mut cursor = 0usize;
+    let Some(major) = parse_decimal_component(release, &mut cursor) else {
+        return false;
+    };
+    if release.get(cursor) != Some(&b'.') {
+        return false;
+    }
+    cursor += 1;
+    let Some(minor) = parse_decimal_component(release, &mut cursor) else {
+        return false;
+    };
+    major > 5 || (major == 5 && minor >= 7)
+}
+
+/// Linux before 5.7 rejected an unprivileged SO_BINDTODEVICE before reading the
+/// interface name. Filtering there would create a name-dependent ENODEV/EPERM
+/// difference and expose rather than hide VPN prefixes. Keep the hook inert on
+/// those kernels; SO_BINDTOIFINDEX did not exist there either.
+fn kernel_needs_socket_bind_hiding() -> bool {
+    match KERNEL_BIND_POLICY.load(Ordering::Relaxed) {
+        KERNEL_BIND_POLICY_NATIVE_ONLY => return false,
+        KERNEL_BIND_POLICY_HOOK => return true,
+        _ => {}
+    }
+
+    let mut uts = core::mem::MaybeUninit::<libc::utsname>::zeroed();
+    let hook = unsafe {
+        if libc::uname(uts.as_mut_ptr()) != 0 {
+            false
+        } else {
+            let uts = uts.assume_init();
+            let release =
+                core::slice::from_raw_parts(uts.release.as_ptr().cast::<u8>(), uts.release.len());
+            let end = release
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(release.len());
+            release_has_unprivileged_first_bind(&release[..end])
+        }
+    };
+    KERNEL_BIND_POLICY.store(
+        if hook {
+            KERNEL_BIND_POLICY_HOOK
+        } else {
+            KERNEL_BIND_POLICY_NATIVE_ONLY
+        },
+        Ordering::Relaxed,
+    );
+    hook
+}
+
+/// Copy caller memory without dereferencing its pointer in-process.
+///
+/// A libc hook receives the same untrusted pointer the kernel syscall would.
+/// Dereferencing it in Rust would turn a normal `setsockopt(..., EFAULT)` into
+/// a process crash. `process_vm_readv` against our own pid gives us the same
+/// fault-contained user-memory read primitive. Use the raw syscall so the
+/// module does not acquire a dynamic dependency on bionic's API-23 symbol.
+fn copy_from_self(src: *const c_void, dst: &mut [u8]) -> bool {
+    if dst.is_empty() {
+        return true;
+    }
+    if src.is_null() {
+        return false;
+    }
+
+    let local = libc::iovec {
+        iov_base: dst.as_mut_ptr().cast(),
+        iov_len: dst.len(),
+    };
+    let remote = libc::iovec {
+        // process_vm_readv's ABI uses mutable iovec fields even though the
+        // remote side is read-only.
+        iov_base: src as *mut c_void,
+        iov_len: dst.len(),
+    };
+    let copied = unsafe {
+        libc::syscall(
+            libc::SYS_process_vm_readv,
+            libc::getpid(),
+            &local as *const libc::iovec,
+            1usize,
+            &remote as *const libc::iovec,
+            1usize,
+            0usize,
+        )
+    };
+    copied == dst.len() as libc::c_long
+}
+
+/// Resolve an interface index without letting our own ioctl hook hide it.
+///
+/// `if_indextoname` normally issues `SIOCGIFNAME`. The thread-local guard is
+/// shared with getifaddrs' internal lookups and makes this one lookup reach the
+/// real ioctl before we classify the returned name ourselves.
+fn ifindex_is_vpn(ifindex: c_int) -> Option<bool> {
+    if ifindex <= 0 {
+        return Some(false);
+    }
+
+    let mut name = [0u8; libc::IFNAMSIZ];
+    let result = IN_GETIFADDRS.with(|guard| {
+        let previous = guard.replace(true);
+        let result = unsafe { libc::if_indextoname(ifindex as u32, name.as_mut_ptr().cast()) };
+        guard.set(previous);
+        result
+    });
+    (!result.is_null()).then(|| is_vpn_iface_bytes(&name))
+}
+
+#[inline(always)]
+fn deny_ifindex_bind(ifindex: c_int, resolved_is_vpn: Option<bool>) -> bool {
+    // Zero unbinds; negative values are left to the kernel's native EINVAL.
+    // A positive index that disappears during resolution is denied: letting an
+    // unresolved index through would re-open the oracle during interface churn.
+    ifindex > 0 && resolved_is_vpn.unwrap_or(true)
+}
+
+/// Check the syscall's first validation step without changing socket state.
+/// Returning false also covers non-socket fds, so the real call can preserve
+/// its native `EBADF`/`ENOTSOCK` ordering before we inspect the interface name.
+fn is_socket_fd(fd: c_int) -> bool {
+    let mut socket_type: c_int = 0;
+    let mut len = core::mem::size_of::<c_int>() as libc::socklen_t;
+    unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut socket_type as *mut c_int).cast(),
+            &mut len,
+        ) == 0
+    }
+}
+
+// ============================================================================
+//  Hook: setsockopt
+// ============================================================================
+
+/// Best-effort Zygisk replacement for bionic's `setsockopt` entry point.
+///
+/// Denies successful socket binds to VPN interfaces before the real syscall,
+/// matching the kernel backends' externally visible `ENODEV` result without
+/// ever leaving `sk_bound_dev_if` mutated. Raw syscalls still bypass this hook;
+/// this exists only as a fallback for devices where kmod/KPM cannot run.
+///
+/// Invalid pointers and unsupported lengths are passed to the real function so
+/// the kernel remains the authority for `EFAULT`/`EINVAL` instead of this hook
+/// crashing or inventing a different result.
+///
+/// # Safety
+///
+/// Called from native code via an inline-hook trampoline. `optval` is untrusted
+/// caller memory and must only be inspected through [`copy_from_self`].
+pub unsafe extern "C" fn hooked_setsockopt(
+    fd: c_int,
+    level: c_int,
+    optname: c_int,
+    optval: *const c_void,
+    optlen: libc::socklen_t,
+) -> c_int {
+    let Some(real) = real_setsockopt() else {
+        set_errno(libc::EFAULT);
+        return -1;
+    };
+
+    if level != libc::SOL_SOCKET {
+        return unsafe { real(fd, level, optname, optval, optlen) };
+    }
+
+    if (optname == libc::SO_BINDTODEVICE || optname == SO_BINDTOIFINDEX)
+        && (!kernel_needs_socket_bind_hiding() || !is_socket_fd(fd))
+    {
+        return unsafe { real(fd, level, optname, optval, optlen) };
+    }
+
+    if optname == libc::SO_BINDTODEVICE {
+        // The kernel takes a signed length internally. Preserve its native
+        // handling for values that wrapped through the unsigned libc ABI.
+        if optlen == 0 || optlen > c_int::MAX as libc::socklen_t {
+            return unsafe { real(fd, level, optname, optval, optlen) };
+        }
+
+        // sock_bindtoindex() copies at most IFNAMSIZ - 1 bytes, then appends a
+        // NUL. Mirror that exact classification window.
+        let copied_len = (optlen as usize).min(libc::IFNAMSIZ - 1);
+        let mut name = [0u8; libc::IFNAMSIZ];
+        if !copy_from_self(optval, &mut name[..copied_len]) {
+            return unsafe { real(fd, level, optname, optval, optlen) };
+        }
+        if is_vpn_iface_bytes(&name) {
+            set_errno(libc::ENODEV);
+            return -1;
+        }
+
+        // Pass the validated snapshot, not the racy caller buffer. The kernel
+        // caps this option to the same copied_len, so shortening a larger
+        // optlen does not change the selected interface.
+        return unsafe {
+            real(
+                fd,
+                level,
+                optname,
+                name.as_ptr().cast(),
+                copied_len as libc::socklen_t,
+            )
+        };
+    }
+
+    if optname == SO_BINDTOIFINDEX {
+        if optlen < core::mem::size_of::<c_int>() as libc::socklen_t
+            || optlen > c_int::MAX as libc::socklen_t
+        {
+            return unsafe { real(fd, level, optname, optval, optlen) };
+        }
+
+        let mut raw = [0u8; core::mem::size_of::<c_int>()];
+        if !copy_from_self(optval, &mut raw) {
+            return unsafe { real(fd, level, optname, optval, optlen) };
+        }
+        let ifindex = c_int::from_ne_bytes(raw);
+        if deny_ifindex_bind(ifindex, ifindex_is_vpn(ifindex)) {
+            set_errno(libc::ENODEV);
+            return -1;
+        }
+
+        // The kernel reads one int and ignores any trailing bytes for this
+        // option. Passing our snapshot closes a caller-memory race.
+        return unsafe {
+            real(
+                fd,
+                level,
+                optname,
+                (&ifindex as *const c_int).cast(),
+                core::mem::size_of::<c_int>() as libc::socklen_t,
+            )
+        };
+    }
+
+    unsafe { real(fd, level, optname, optval, optlen) }
 }
 
 // ============================================================================
@@ -1178,6 +1471,183 @@ fn collect_vpn_iface_indices() -> ([u32; crate::filter::MAX_VPN_ADDRS], usize) {
     }
 
     (indices, n)
+}
+
+#[cfg(test)]
+mod setsockopt_tests {
+    use core::ffi::{c_int, c_void};
+    use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+    use super::{
+        KERNEL_BIND_POLICY, KERNEL_BIND_POLICY_HOOK, SO_BINDTOIFINDEX, copy_from_self,
+        deny_ifindex_bind, hooked_setsockopt, release_has_unprivileged_first_bind, set_errno,
+        set_real_setsockopt_ptr,
+    };
+
+    static REAL_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static LAST_OPTLEN: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "C" fn fake_setsockopt(
+        _fd: c_int,
+        _level: c_int,
+        _optname: c_int,
+        _optval: *const c_void,
+        optlen: libc::socklen_t,
+    ) -> c_int {
+        REAL_CALLS.fetch_add(1, Ordering::Relaxed);
+        LAST_OPTLEN.store(optlen, Ordering::Relaxed);
+        73
+    }
+
+    #[test]
+    fn self_copy_contains_bad_caller_pointers() {
+        let source = *b"tun0";
+        let mut destination = [0u8; 4];
+        assert!(copy_from_self(source.as_ptr().cast(), &mut destination));
+        assert_eq!(destination, source);
+
+        assert!(!copy_from_self(
+            core::ptr::dangling::<c_void>(),
+            &mut destination
+        ));
+    }
+
+    #[test]
+    fn ifindex_decision_denies_vpn_and_resolution_races_only() {
+        assert!(deny_ifindex_bind(42, Some(true)));
+        assert!(deny_ifindex_bind(42, None));
+        assert!(!deny_ifindex_bind(42, Some(false)));
+        assert!(!deny_ifindex_bind(0, Some(true)));
+        assert!(!deny_ifindex_bind(-1, Some(true)));
+    }
+
+    #[test]
+    fn socket_bind_oracle_starts_at_linux_5_7() {
+        assert!(!release_has_unprivileged_first_bind(b"4.19.325-android"));
+        assert!(!release_has_unprivileged_first_bind(b"5.6.19"));
+        assert!(release_has_unprivileged_first_bind(b"5.7.0"));
+        assert!(release_has_unprivileged_first_bind(b"6.1.134-gki"));
+        assert!(!release_has_unprivileged_first_bind(b"not-a-release"));
+    }
+
+    #[test]
+    fn libc_hook_denies_vpn_names_before_calling_the_real_function() {
+        set_real_setsockopt_ptr(fake_setsockopt as *const ());
+        KERNEL_BIND_POLICY.store(KERNEL_BIND_POLICY_HOOK, Ordering::Relaxed);
+        REAL_CALLS.store(0, Ordering::Relaxed);
+        LAST_OPTLEN.store(u32::MAX, Ordering::Relaxed);
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0);
+
+        let vpn = *b"tun0";
+        set_errno(0);
+        let rc = unsafe {
+            hooked_setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                vpn.as_ptr().cast(),
+                vpn.len() as libc::socklen_t,
+            )
+        };
+        assert_eq!(rc, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENODEV)
+        );
+        assert_eq!(REAL_CALLS.load(Ordering::Relaxed), 0);
+
+        let physical = *b"eth0";
+        let rc = unsafe {
+            hooked_setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                physical.as_ptr().cast(),
+                physical.len() as libc::socklen_t,
+            )
+        };
+        assert_eq!(rc, 73);
+        assert_eq!(REAL_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(LAST_OPTLEN.load(Ordering::Relaxed), 4);
+
+        // Empty names unbind and must retain the kernel's native behavior.
+        let rc = unsafe {
+            hooked_setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                core::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(rc, 73);
+        assert_eq!(REAL_CALLS.load(Ordering::Relaxed), 2);
+
+        // A bad pointer is handed to the real syscall, which remains the
+        // authority for EFAULT; the hook itself must not dereference it.
+        let rc = unsafe {
+            hooked_setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                core::ptr::dangling::<c_void>(),
+                4,
+            )
+        };
+        assert_eq!(rc, 73);
+        assert_eq!(REAL_CALLS.load(Ordering::Relaxed), 3);
+
+        // Wrapped signed lengths likewise stay on the native path.
+        let rc = unsafe {
+            hooked_setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                core::ptr::dangling::<c_void>(),
+                c_int::MAX as libc::socklen_t + 1,
+            )
+        };
+        assert_eq!(rc, 73);
+        assert_eq!(REAL_CALLS.load(Ordering::Relaxed), 4);
+
+        // Index zero is an unbind and the real function receives one validated
+        // int rather than a potentially mutable caller buffer.
+        let ifindex = 0i32;
+        let rc = unsafe {
+            hooked_setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                SO_BINDTOIFINDEX,
+                (&ifindex as *const c_int).cast(),
+                core::mem::size_of::<c_int>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(rc, 73);
+        assert_eq!(REAL_CALLS.load(Ordering::Relaxed), 5);
+        assert_eq!(
+            LAST_OPTLEN.load(Ordering::Relaxed),
+            core::mem::size_of::<c_int>() as u32
+        );
+
+        // Validation ordering matters: even a VPN-looking value on an invalid
+        // fd belongs to the real syscall's EBADF path, not our ENODEV path.
+        let rc = unsafe {
+            hooked_setsockopt(
+                -1,
+                libc::SOL_SOCKET,
+                libc::SO_BINDTODEVICE,
+                vpn.as_ptr().cast(),
+                vpn.len() as libc::socklen_t,
+            )
+        };
+        assert_eq!(rc, 73);
+        assert_eq!(REAL_CALLS.load(Ordering::Relaxed), 6);
+
+        unsafe {
+            libc::close(fd);
+        }
+    }
 }
 
 #[cfg(test)]

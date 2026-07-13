@@ -140,6 +140,9 @@ inspect the socket from a non-target UID; simply checking the returned errno
 would bless the broken return-only implementation this hook was designed to
 avoid. The QEMU `bind-probe` performs that full state-level test with a raw
 syscall and an inherited socket. Runtime hits still appear in Statistics.
+The Zygisk fallback has a separate `zygisk_setsockopt` hook for libc-routed
+calls, but the raw diagnostic probe bypasses it by design; Zygisk does not emit
+per-hook statistics yet.
 
 Java-level checks (LSPosed) cover the framework side — `hasTransport(VPN)`,
 `NET_CAPABILITY_NOT_VPN`, `VpnTransportInfo`, `getAllNetworks`, `LinkProperties`,

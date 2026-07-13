@@ -30,6 +30,7 @@ class ProbeStatsTest {
         assertEquals(DetectionMethod.Routes, DetectionMethod.of(HookIds.Hook.FIB_ROUTE_SEQ_SHOW))
         assertEquals(DetectionMethod.Routes, DetectionMethod.of(HookIds.Hook.FIB_DUMP_INFO))
         assertEquals(DetectionMethod.SocketBinding, DetectionMethod.of(HookIds.Hook.SOCKET_BIND_INTERFACE))
+        assertEquals(DetectionMethod.SocketBinding, DetectionMethod.of(HookIds.Hook.ZYGISK_SETSOCKOPT))
     }
 
     @Test

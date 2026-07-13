@@ -86,11 +86,14 @@ internal object HookIds {
 
         // SO_BINDTODEVICE / SO_BINDTOIFINDEX pre-mutation denial
         SOCKET_BIND_INTERFACE(25, "socket_bind_interface", "SO_BINDTODEVICE / SO_BINDTOIFINDEX pre-mutation denial"),
+
+        // libc setsockopt() best-effort socket-interface bind denial
+        ZYGISK_SETSOCKOPT(26, "zygisk_setsockopt", "libc setsockopt() best-effort socket-interface bind denial"),
     }
 
     // Hooks owned by each backend: apply `mask and own`.
     const val KERNEL_HOOK_MASK = 0x20003ff
-    const val ZYGISK_HOOK_MASK = 0x1fc0000
+    const val ZYGISK_HOOK_MASK = 0x5fc0000
     const val LSPOSED_HOOK_MASK = 0x3fc00
 
     /** status error codes (protocol §5.1). */

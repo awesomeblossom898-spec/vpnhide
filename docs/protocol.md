@@ -377,9 +377,9 @@ Current kernel hooks (`.ko` / KPM, 11): `fib_route_seq_show`,
 `lsposed_network_capabilities`, `lsposed_network_info`, `lsposed_network`,
 `lsposed_connectivity_result`, `lsposed_connectivity_callback`,
 `lsposed_connectivity_network`, `lsposed_package_visibility`. Current Zygisk
-libc hooks (7): `zygisk_ioctl`, `zygisk_getifaddrs`, `zygisk_openat`,
+libc hooks (8): `zygisk_ioctl`, `zygisk_getifaddrs`, `zygisk_openat`,
 `zygisk_recvmsg`, `zygisk_recv`, `zygisk_recvfrom`,
-`zygisk_recvfrom_chk`.
+`zygisk_recvfrom_chk`, `zygisk_setsockopt`.
 
 ### 5.1 Error codes (`status`)
 

@@ -12,9 +12,11 @@ All hooks are inline on `libc.so` via ByteDance shadowhook:
 | `ioctl` | `SIOCGIFNAME` | Calls through; rewrites result to `ENODEV` if returned name is VPN. |
 | `ioctl` | `SIOCGIFCONF` | Calls through; compacts VPN entries out of the returned `ifreq` array. |
 | `getifaddrs` | `NetworkInterface.getNetworkInterfaces()`, Dart VM, direct C/C++ | Unlinks VPN entries from the returned linked list. |
+| `setsockopt` | `SO_BINDTODEVICE`, `SO_BINDTOIFINDEX` | Best-effort fallback: returns `ENODEV` before the syscall for VPN names/indices. |
 | `openat` | `/proc/net/{route,ipv6_route,if_inet6,tcp,tcp6}` | Returns a memfd with VPN entries stripped out. |
 | `recvmsg` | Netlink `RTM_NEWADDR` / `RTM_NEWLINK` dump responses | Removes VPN interface entries from netlink messages. |
 | `recv` | Netlink `RTM_NEWADDR` / `RTM_NEWLINK` dump responses | Same as `recvmsg`; hooked separately because bionic's `recv()` tail-calls `recvfrom`. |
+| `recvfrom`, `__recvfrom_chk` | Direct/FORTIFY'd netlink reads | Same filtering for callers that bypass the plain `recv` symbol. |
 
 ## Architecture
 
@@ -25,7 +27,7 @@ PLT hooks patch the caller library's procedure linkage table. At `post_app_speci
 ### Flow
 
 1. **`pre_app_specialize`** -- runs in the already-forked child, before the kernel drops it to the app's UID and SELinux context (still has zygote privileges at this point). Reads `args.nice_name`, checks against the module-dir `targets.txt` runtime wire generated from `/data/system/vpnhide_config.json` by the activator. Non-targeted apps get `DlCloseModuleLibrary` (zero cost after unload). See `src/lib.rs`'s top-level doc block for the full Zygisk lifecycle and why every Rust `static` is fresh per app launch.
-2. **`post_app_specialize`** -- on targeted processes only: `shadowhook_init`, install five inline hooks (`ioctl`, `getifaddrs`, `openat`, `recvmsg`, `recv`), then scrub maps. `recv` is hooked separately because bionic's `recv()` is `b recvfrom` (tail-call) — patching `recvfrom`'s prologue would break `recv`.
+2. **`post_app_specialize`** -- on targeted processes only: `shadowhook_init`, install the selected inline hooks (`ioctl`, `getifaddrs`, `setsockopt`, `openat`, `recvmsg`, `recv`, `recvfrom`, `__recvfrom_chk`), then scrub maps. `recv` is hooked separately because bionic's `recv()` is `b recvfrom` (tail-call) — patching `recvfrom`'s prologue would break `recv`.
 
 ### Thread-local guard
 
@@ -118,7 +120,8 @@ VPN interface prefixes: `tun`, `ppp`, `tap`, `wg`, `ipsec`, `xfrm`, `utun`, `l2t
 
 ## Known limitations
 
-- **Direct `svc #0` syscalls bypass the hook.** Apps issuing raw syscalls skip libc entirely. Use a kernel-level backend, [vpnhide-kmod](../kmod/) or [KPM](../kmod/kpm/), for these apps.
+- **Direct `svc #0` syscalls bypass the hook.** Apps issuing raw syscalls skip libc entirely, including the best-effort `setsockopt` protection. Use a kernel-level backend, [vpnhide-kmod](../kmod/) or [KPM](../kmod/kpm/), for these apps.
+- **Socket binding is left native before Linux 5.7.** Those kernels reject an unprivileged `SO_BINDTODEVICE` before reading the name, and `SO_BINDTOIFINDEX` does not exist; filtering would introduce a distinguishable error instead of closing an oracle.
 - **arm64 only.** No 32-bit arm, no x86.
 - **`getifaddrs` hook leaks a few bytes per call.** Unlinked VPN entries in the ifaddrs linked list are intentionally leaked rather than tracked with a shadow allocator. Acceptable tradeoff -- `getifaddrs` is called infrequently.
 - **Tested on Android 16 (API 36).** Should work back to API 24 in principle, but nothing older has been exercised.
@@ -126,7 +129,7 @@ VPN interface prefixes: `tun`, `ppp`, `tap`, `wg`, `ipsec`, `xfrm`, `utun`, `l2t
 ## Files
 
 - `src/lib.rs` -- module entry point, target gating, hook installer, maps scrubbing
-- `src/hooks.rs` -- hook replacements for ioctl, getifaddrs, openat, recvmsg, recv
+- `src/hooks.rs` -- hook replacements for ioctl, getifaddrs, setsockopt, openat, and the recv family
 - `src/filter.rs` -- VPN interface name matching and proc/net content filters (unit tested)
 - `src/shadowhook.rs` -- minimal FFI to shadowhook
 - `build.rs` -- drives CMake on the shadowhook submodule

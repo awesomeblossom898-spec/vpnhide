@@ -180,6 +180,15 @@ name = "socket_bind_interface"
 backend = "kernel"
 note = "SO_BINDTODEVICE / SO_BINDTOIFINDEX pre-mutation denial"
 
+# Zygisk fallback for the same vector. This remains a separate id because it
+# only covers callers routed through bionic's setsockopt() entry point; raw
+# syscalls still require one of the kernel backends.
+[[hook]]
+id = 26
+name = "zygisk_setsockopt"
+backend = "zygisk"
+note = "libc setsockopt() best-effort socket-interface bind denial"
+
 # --- backend ids (protocol §4.3 `status backend <id>`) ----------------------
 # Which backend answered a `status` read. Distinct from the hook `backend`
 # field above (.ko and KPM both own "kernel" hooks but are separate backends).
