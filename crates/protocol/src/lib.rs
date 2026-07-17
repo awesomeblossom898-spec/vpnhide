@@ -40,12 +40,21 @@ pub struct Target {
     pub hookmask: u32,
 }
 
+/// One `prefix <ifname> <addr32hex> <plen>` record (§4.3, global scope).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PrefixRule {
+    pub ifname: String,
+    pub addr: [u8; 16],
+    pub prefix_len: u8,
+}
+
 /// A parsed `config` snapshot. `debug` is `None` when no `debug` line was
 /// present ("unchanged from default", §4.3), else `Some(flag)`.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Config {
     pub debug: Option<bool>,
     pub targets: Vec<Target>,
+    pub prefixes: Vec<PrefixRule>,
 }
 
 /// One sparse `<hook_id>:<count>` stats cell for a uid (§4.3). Producers group
@@ -162,6 +171,38 @@ fn parse_hex(tok: &[u8], bits: u32) -> Option<u64> {
     Some(v)
 }
 
+fn hexval(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Parse exactly 32 hex chars (any case) into 16 network-order bytes (§4.3).
+fn parse_addr32(tok: &[u8]) -> Option<[u8; 16]> {
+    if tok.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for i in 0..16 {
+        let hi = hexval(tok[2 * i])?;
+        let lo = hexval(tok[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
+/// An interface-name token: 1..15 ASCII chars (tokens are already ASCII, since
+/// `significant()` rejects non-ASCII lines). Empty or >= 16 → None.
+fn parse_ifname(tok: &[u8]) -> Option<String> {
+    if tok.is_empty() || tok.len() >= 16 {
+        return None;
+    }
+    Some(String::from_utf8_lossy(tok).into_owned())
+}
+
 // --- header (§4.2) ---------------------------------------------------------
 
 /// Parse the mandatory header line, returning `(kind, rest_after_header)`.
@@ -243,6 +284,7 @@ pub fn parse_config(buf: &[u8]) -> Option<Config> {
     let mut cfg = Config {
         debug: None,
         targets: Vec::new(),
+        prefixes: Vec::new(),
     };
     for line in lines(rest) {
         let Some(content) = significant(line) else {
@@ -264,6 +306,23 @@ pub fn parse_config(buf: &[u8]) -> Option<Config> {
                 };
                 set_target(&mut cfg.targets, uid as u32, hm as u32);
             }
+            Some(b"prefix") => {
+                let (Some(ifname), Some(addr), Some(plen)) = (
+                    it.next().and_then(parse_ifname),
+                    it.next().and_then(parse_addr32),
+                    it.next().and_then(|t| parse_hex(t, 32)),
+                ) else {
+                    continue; // malformed ⇒ skip line
+                };
+                if plen > 128 {
+                    continue;
+                }
+                cfg.prefixes.push(PrefixRule {
+                    ifname,
+                    addr,
+                    prefix_len: plen as u8,
+                });
+            }
             _ => {} // unknown keyword ⇒ skip line (§4.5)
         }
     }
@@ -280,14 +339,26 @@ fn set_target(targets: &mut Vec<Target>, uid: u32, hookmask: u32) {
 
 // --- serialise (§4.3/§4.4) -------------------------------------------------
 
-/// Serialise a `config` snapshot (lowercase-out hex, §4.4).
-pub fn format_config(debug: bool, targets: &[Target]) -> String {
+/// Serialise a `config` snapshot with prefix rules (lowercase-out, §4.4).
+pub fn format_config_ex(debug: bool, targets: &[Target], prefixes: &[PrefixRule]) -> String {
     let mut out = String::from("vpnhide 1 config\n");
     out.push_str(if debug { "debug 1\n" } else { "debug 0\n" });
     for t in targets {
         out.push_str(&format!("target 0x{:x} 0x{:x}\n", t.uid, t.hookmask));
     }
+    for pr in prefixes {
+        out.push_str(&format!("prefix {} ", pr.ifname));
+        for b in pr.addr {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out.push_str(&format!(" 0x{:x}\n", pr.prefix_len));
+    }
     out
+}
+
+/// Serialise a `config` snapshot (targets only). Existing callers unchanged.
+pub fn format_config(debug: bool, targets: &[Target]) -> String {
+    format_config_ex(debug, targets, &[])
 }
 
 /// Serialise a `stats` snapshot. Entries grouped by uid (consecutive same-uid
@@ -404,6 +475,13 @@ mod tests {
         let mut got = format!("debug={dbg}");
         for t in &cfg.targets {
             got.push_str(&format!(";0x{:x}:0x{:x}", t.uid, t.hookmask));
+        }
+        for pr in &cfg.prefixes {
+            got.push_str(&format!(";pfx:{}:", pr.ifname));
+            for b in pr.addr {
+                got.push_str(&format!("{b:02x}"));
+            }
+            got.push_str(&format!(":{}", pr.prefix_len));
         }
         assert_eq!(got, expect, "cfg mismatch for {input:?}");
     }
