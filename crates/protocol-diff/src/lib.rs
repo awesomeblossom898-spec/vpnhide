@@ -18,18 +18,12 @@ mod tests {
         hookmask: u32,
     }
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Default)]
     #[repr(C)]
     struct CPrefixRule {
         ifname: [u8; 16],
         addr: [u8; 16],
         prefix_len: u8,
-    }
-
-    impl Default for CPrefixRule {
-        fn default() -> Self {
-            Self { ifname: [0; 16], addr: [0; 16], prefix_len: 0 }
-        }
     }
 
     unsafe extern "C" {
@@ -73,7 +67,10 @@ mod tests {
             },
             targets: targets[..count as usize]
                 .iter()
-                .map(|t| Target { uid: t.uid, hookmask: t.hookmask })
+                .map(|t| Target {
+                    uid: t.uid,
+                    hookmask: t.hookmask,
+                })
                 .collect(),
             prefixes: prefixes[..pcount as usize]
                 .iter()
