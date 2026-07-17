@@ -679,16 +679,21 @@ static inline void vpnhide_target_set(struct vpnhide_target *out, int *n,
  * too new, or a non-config kind). *debug receives 0/1 if a `debug` line is
  * present, and is left UNCHANGED otherwise (the caller seeds it with the live
  * value so "absent ⇒ unchanged-from-default", §4.3). Unknown keywords and
- * malformed numeric lines are skipped, not fatal (§4.5).
+ * malformed numeric lines are skipped, not fatal (§4.5). Prefix rules
+ * (§ prefix record) are written to pout[0..*pnr) when pout && pnr are given.
  */
-static inline int vpnhide_parse_config(const char *b, unsigned long len,
-				       struct vpnhide_target *out, int max,
-				       int *debug)
+static inline int vpnhide_parse_config_ex(const char *b, unsigned long len,
+					  struct vpnhide_target *out, int max,
+					  int *debug,
+					  struct vpnhide_prefix_rule *pout,
+					  int pmax, int *pnr)
 {
 	unsigned long i, ls, le, cs, p, ts, te;
 	int ascii, n = 0;
 	enum vpnhide_kind k = vpnhide_parse_header(b, len, &i);
 
+	if (pnr)
+		*pnr = 0;
 	if (k != VPNHIDE_KIND_CONFIG)
 		return -1;
 
@@ -720,10 +725,35 @@ static inline int vpnhide_parse_config(const char *b, unsigned long len,
 				continue;
 			vpnhide_target_set(out, &n, max, (unsigned int)uid,
 					   (unsigned int)hm);
+		} else if (vpnhide_tok_eq(b, ts, te, "prefix")) {
+			struct vpnhide_prefix_rule r;
+			unsigned long long plen;
+
+			if (!vpnhide_next_token(b, &p, le, &ts, &te) ||
+			    !vpnhide_tok_ifname(b, ts, te, r.ifname))
+				continue;
+			if (!vpnhide_next_token(b, &p, le, &ts, &te) ||
+			    !vpnhide_tok_addr32(b, ts, te, r.addr))
+				continue;
+			if (!vpnhide_next_token(b, &p, le, &ts, &te) ||
+			    !vpnhide_tok_hex(b, ts, te, 32, &plen) ||
+			    plen > 128)
+				continue;
+			r.prefix_len = (unsigned char)plen;
+			if (pout && pnr && *pnr < pmax)
+				pout[(*pnr)++] = r;
 		}
 		/* unknown first token ⇒ skip the line (§4.5) */
 	}
 	return n;
+}
+
+/* Back-compat wrapper: targets + debug only (existing callers unchanged). */
+static inline int vpnhide_parse_config(const char *b, unsigned long len,
+				       struct vpnhide_target *out, int max,
+				       int *debug)
+{
+	return vpnhide_parse_config_ex(b, len, out, max, debug, 0, 0, 0);
 }
 
 /* --- serialise (§4.3/§4.4) ------------------------------------------- */

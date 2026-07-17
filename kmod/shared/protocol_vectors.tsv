@@ -82,3 +82,21 @@ clamp|aaa\nbbb\nccc\n|6|aaa
 clamp|aaa\nbbb\nccc\n|4|aaa
 # not even the first line fits -> empty
 clamp|aaa\nbbb\nccc\n|2|
+
+# --- prefix rules (IPv6 prefix filter) -------------------------------------
+# a single global prefix rule parses; rendered as ;pfx:<iface>:<32hex>:<plen>
+cfg|vpnhide 1 config\nprefix rmnet_data1 24014900000000000000000000000000 0x20\n|debug=-1;pfx:rmnet_data1:24014900000000000000000000000000:32
+# targets first (return count), then prefixes
+cfg|vpnhide 1 config\ntarget 0x2710 0x1\nprefix wlan0 fe800000000000000000000000000000 0x40\n|debug=-1;0x2710:0x1;pfx:wlan0:fe800000000000000000000000000000:64
+# address is liberal-in on case; rendered lowercase-out
+cfg|vpnhide 1 config\nprefix eth0 2401490000000000000000000000ABCD 0x80\n|debug=-1;pfx:eth0:2401490000000000000000000000abcd:128
+# short address (31 chars) -> reject that line
+cfg|vpnhide 1 config\nprefix rmnet_data1 2401490000000000000000000000000 0x20\ntarget 0x5 0x2\n|debug=-1;0x5:0x2
+# long address (33 chars) -> reject that line
+cfg|vpnhide 1 config\nprefix rmnet_data1 240149000000000000000000000000000 0x20\ntarget 0x6 0x2\n|debug=-1;0x6:0x2
+# plen > 128 -> reject that line
+cfg|vpnhide 1 config\nprefix rmnet_data1 24014900000000000000000000000000 0x81\n|debug=-1
+# overlong ifname (16 chars) -> reject that line
+cfg|vpnhide 1 config\nprefix abcdefghijklmnop 24014900000000000000000000000000 0x20\n|debug=-1
+# missing plen token -> reject that line
+cfg|vpnhide 1 config\nprefix rmnet_data1 24014900000000000000000000000000\n|debug=-1

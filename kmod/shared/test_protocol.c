@@ -88,8 +88,11 @@ static void run_cfg(const char *raw_in, const char *expect)
 	char in[2048];
 	unsigned long len = decode(raw_in, in, sizeof(in));
 	struct vpnhide_target out[MAX_TARGETS];
+	struct vpnhide_prefix_rule pr[MAX_PREFIX_RULES];
 	int debug = -1;
-	int n = vpnhide_parse_config(in, len, out, MAX_TARGETS, &debug);
+	int npr = 0;
+	int n = vpnhide_parse_config_ex(in, len, out, MAX_TARGETS, &debug, pr,
+					MAX_PREFIX_RULES, &npr);
 
 	checks++;
 	if (strcmp(expect, "REJECT") == 0) {
@@ -102,12 +105,21 @@ static void run_cfg(const char *raw_in, const char *expect)
 		return;
 	}
 
-	/* Build "debug=<d>;uid:hm;..." from the parse result and compare. */
+	/* "debug=<d>;uid:hm;...;pfx:iface:32hex:plen;..." */
 	char got[2048];
 	int pos = snprintf(got, sizeof(got), "debug=%d", debug);
 	for (int i = 0; i < n; i++)
 		pos += snprintf(got + pos, sizeof(got) - (size_t)pos,
 				";0x%x:0x%x", out[i].uid, out[i].hookmask);
+	for (int i = 0; i < npr; i++) {
+		pos += snprintf(got + pos, sizeof(got) - (size_t)pos,
+				";pfx:%s:", pr[i].ifname);
+		for (int j = 0; j < 16; j++)
+			pos += snprintf(got + pos, sizeof(got) - (size_t)pos,
+					"%02x", pr[i].addr[j]);
+		pos += snprintf(got + pos, sizeof(got) - (size_t)pos, ":%u",
+				pr[i].prefix_len);
+	}
 	if (strcmp(got, expect) != 0)
 		fail("cfg parse mismatch", got, expect);
 }
