@@ -318,6 +318,18 @@ struct vpnhide_target {
 	unsigned int hookmask;
 };
 
+#ifndef MAX_PREFIX_RULES
+#define MAX_PREFIX_RULES 8
+#endif
+
+/* one `prefix <ifname> <addr32hex> <plen>` config record (global scope): hide
+ * any v6 on interface `ifname` whose first `prefix_len` bits equal `addr`. */
+struct vpnhide_prefix_rule {
+	char ifname[VPNHIDE_IFNAMSIZ]; /* NUL-terminated */
+	unsigned char addr[16];        /* network order  */
+	unsigned char prefix_len;      /* 0..128         */
+};
+
 /* one sparse `<hook_id>:<count>` stats cell for a given uid (§4.3). The
  * producer groups consecutive entries by uid; format_stats emits one line per
  * uid run. count is u64 cumulative-since-load (OPEN-3). */
@@ -503,6 +515,83 @@ static inline int vpnhide_tok_hex(const char *b, unsigned long ts,
 		v = v * 16ULL + d;
 	}
 	*out = v;
+	return 1;
+}
+
+/* Single hex digit → 0..15, else -1. Case-insensitive (§4.4 liberal-in). */
+static inline int vpnhide_hexval(char c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return c - 'a' + 10;
+	if (c >= 'A' && c <= 'F')
+		return c - 'A' + 10;
+	return -1;
+}
+
+/*
+ * Parse EXACTLY 32 hex chars [ts,te) into out[16] (network order). A 128-bit
+ * IPv6 address does not fit the 0x-hex u32/u64 primitive (§4.4), so the prefix
+ * record uses the fixed-width bare-hex spelling /proc/net/if_inet6 already
+ * uses. Not 32 chars, or any non-hex char → 0 (reject the line).
+ */
+static inline int vpnhide_tok_addr32(const char *b, unsigned long ts,
+				     unsigned long te, unsigned char out[16])
+{
+	int i, hi, lo;
+
+	if (te - ts != 32)
+		return 0;
+	for (i = 0; i < 16; i++) {
+		hi = vpnhide_hexval(b[ts + (unsigned long)(2 * i)]);
+		lo = vpnhide_hexval(b[ts + (unsigned long)(2 * i + 1)]);
+		if (hi < 0 || lo < 0)
+			return 0;
+		out[i] = (unsigned char)((hi << 4) | lo);
+	}
+	return 1;
+}
+
+/*
+ * Copy an interface-name token [ts,te) into dst[VPNHIDE_IFNAMSIZ]. Empty, or
+ * too long to hold a NUL (>= IFNAMSIZ) → 0 (reject the line).
+ */
+static inline int vpnhide_tok_ifname(const char *b, unsigned long ts,
+				     unsigned long te, char *dst)
+{
+	unsigned long n = te - ts, j;
+
+	if (n == 0 || n >= (unsigned long)VPNHIDE_IFNAMSIZ)
+		return 0;
+	for (j = 0; j < n; j++)
+		dst[j] = b[ts + j];
+	dst[n] = '\0';
+	return 1;
+}
+
+/*
+ * True if the first `r->prefix_len` bits of `addr` equal `r->addr`. Bits beyond
+ * the prefix are ignored; the boundary byte is masked. prefix_len > 128 → 0.
+ */
+static inline int vpnhide_prefix_match(const unsigned char addr[16],
+				       const struct vpnhide_prefix_rule *r)
+{
+	unsigned int full, rem, i;
+
+	if (!addr || !r || r->prefix_len > 128)
+		return 0;
+	full = (unsigned int)r->prefix_len >> 3;
+	rem = (unsigned int)r->prefix_len & 7u;
+	for (i = 0; i < full; i++)
+		if (addr[i] != r->addr[i])
+			return 0;
+	if (rem) {
+		unsigned char mask = (unsigned char)(0xffu << (8u - rem));
+
+		if (((addr[full] ^ r->addr[full]) & mask) != 0)
+			return 0;
+	}
 	return 1;
 }
 

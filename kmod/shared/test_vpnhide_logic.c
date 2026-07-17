@@ -154,6 +154,59 @@ static void test_parse_uids(void)
 	}
 }
 
+static void test_prefix_match(void)
+{
+	struct vpnhide_prefix_rule r;
+	unsigned char a[16];
+
+	/* 2401:4900::/32 */
+	memset(&r, 0, sizeof(r));
+	r.prefix_len = 32;
+	r.addr[0] = 0x24;
+	r.addr[1] = 0x01;
+	r.addr[2] = 0x49;
+	r.addr[3] = 0x00;
+
+	memset(a, 0, sizeof(a));
+	a[0] = 0x24;
+	a[1] = 0x01;
+	a[2] = 0x49;
+	a[3] = 0x00;
+	a[4] = 0xa3;
+	a[5] = 0xf1; /* 2401:4900:a3f1:: — in-prefix */
+	expect_int("prefix /32 in", vpnhide_prefix_match(a, &r), 1);
+
+	a[3] = 0x01; /* 2401:4901:: — out at /32 */
+	expect_int("prefix /32 out", vpnhide_prefix_match(a, &r), 0);
+
+	r.prefix_len = 0; /* /0 matches anything */
+	expect_int("prefix /0 any", vpnhide_prefix_match(a, &r), 1);
+
+	/* /33: bit 33 must match (byte 4, top bit) */
+	memset(&r, 0, sizeof(r));
+	r.prefix_len = 33;
+	r.addr[4] = 0x80;
+	memset(a, 0, sizeof(a));
+	a[4] = 0x80;
+	expect_int("prefix /33 in", vpnhide_prefix_match(a, &r), 1);
+	a[4] = 0x00;
+	expect_int("prefix /33 out", vpnhide_prefix_match(a, &r), 0);
+
+	/* /128 exact */
+	memset(&r, 0, sizeof(r));
+	r.prefix_len = 128;
+	r.addr[15] = 0x01;
+	memset(a, 0, sizeof(a));
+	a[15] = 0x01;
+	expect_int("prefix /128 eq", vpnhide_prefix_match(a, &r), 1);
+	a[15] = 0x02;
+	expect_int("prefix /128 ne", vpnhide_prefix_match(a, &r), 0);
+
+	/* out-of-range plen rejects */
+	r.prefix_len = 129;
+	expect_int("prefix /129 reject", vpnhide_prefix_match(a, &r), 0);
+}
+
 int main(void)
 {
 	test_route_first_field();
@@ -163,6 +216,7 @@ int main(void)
 	test_is_public_ipv6();
 	test_is_physical_iface();
 	test_parse_uids();
+	test_prefix_match();
 
 	if (failures) {
 		fprintf(stderr, "%d test(s) failed\n", failures);
