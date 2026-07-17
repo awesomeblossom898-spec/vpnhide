@@ -1,0 +1,35 @@
+# Temporary Phase 1 verification for the IPv6-prefix-filter fork.
+# Runs the shared-logic/protocol host C tests + the Rust protocol crates on a
+# stock ubuntu runner (gcc + cargo preinstalled) — no CI container image needed,
+# so it works on a fork where ghcr.io/<owner>/vpnhide/ci does not exist.
+# NOT for upstream: excluded from the PR.
+name: prefix-phase1-check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/ipv6-prefix-filter]
+
+jobs:
+  phase1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: C host tests (shared-logic + protocol vectors)
+        run: |
+          set -euxo pipefail
+          cd kmod/shared
+          gcc -O2 -Wall -Wextra -Werror -I.. -o /tmp/test_vpnhide_logic test_vpnhide_logic.c
+          /tmp/test_vpnhide_logic
+          gcc -O2 -Wall -Wextra -Werror -I.. -o /tmp/test_protocol test_protocol.c
+          /tmp/test_protocol protocol_vectors.tsv
+
+      - name: rustfmt (protocol crates)
+        run: cargo fmt --check -p vpnhide_protocol -p vpnhide_protocol_diff
+
+      - name: clippy (protocol crates, -D warnings)
+        run: cargo clippy -p vpnhide_protocol -p vpnhide_protocol_diff --all-targets -- -D warnings
+
+      - name: cargo test (protocol + diff oracle)
+        run: cargo test -p vpnhide_protocol -p vpnhide_protocol_diff
