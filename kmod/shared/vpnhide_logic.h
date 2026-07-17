@@ -326,8 +326,8 @@ struct vpnhide_target {
  * any v6 on interface `ifname` whose first `prefix_len` bits equal `addr`. */
 struct vpnhide_prefix_rule {
 	char ifname[VPNHIDE_IFNAMSIZ]; /* NUL-terminated */
-	unsigned char addr[16];        /* network order  */
-	unsigned char prefix_len;      /* 0..128         */
+	unsigned char addr[16]; /* network order  */
+	unsigned char prefix_len; /* 0..128         */
 };
 
 /* one sparse `<hook_id>:<count>` stats cell for a given uid (§4.3). The
