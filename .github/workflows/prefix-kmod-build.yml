@@ -1,0 +1,77 @@
+# Temporary .ko build pipeline for the IPv6-prefix-filter fork.
+# The stock ci.yml kmod build works off the PUBLIC ghcr.io/ylarod/ddk-min
+# image, but its activator dependency runs in the PRIVATE fork ci image that
+# does not exist on a fork. This workflow rebuilds the activator on a plain
+# ubuntu runner, then reuses the exact stock kmod build in the public ddk-min
+# container — for just the two KMIs we target. NOT for upstream.
+name: prefix-kmod-build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/ipv6-prefix-filter]
+
+jobs:
+  activator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust target + cargo-ndk
+        run: |
+          set -euxo pipefail
+          rustup target add aarch64-linux-android
+          cargo install cargo-ndk --locked
+
+      - name: Build kmod activator (aarch64-linux-android)
+        run: |
+          set -euxo pipefail
+          export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+          echo "Using NDK at $ANDROID_NDK_HOME"
+          cargo ndk -t arm64-v8a build --release -p vpnhide_activator --bin kmod
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kmod-activator
+          path: target/aarch64-linux-android/release/kmod
+          if-no-files-found: error
+
+  kmod:
+    needs: activator
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kmi:
+          - android12-5.10
+          - android16-6.12
+    # Public third-party DDK image (no credentials needed) — mirrors the stock
+    # ci.yml kmod job. Tag mirrors DDK_IMAGE_TAG in kmod/build.py.
+    container:
+      image: ghcr.io/ylarod/ddk-min:${{ matrix.kmi }}-20260313
+    env:
+      KMI: ${{ matrix.kmi }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Mark workspace safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Download kmod activator
+        uses: actions/download-artifact@v7
+        with:
+          name: kmod-activator
+          path: .artifacts/kmod-activator
+
+      - name: Build and package kernel module
+        env:
+          VPNHIDE_KMOD_ACTIVATOR: ${{ github.workspace }}/.artifacts/kmod-activator/kmod
+        run: python3 kmod/build.py --kmi "$KMI" --inside-container
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vpnhide-kmod-${{ matrix.kmi }}
+          path: vpnhide-kmod-${{ matrix.kmi }}.zip
+          if-no-files-found: error
