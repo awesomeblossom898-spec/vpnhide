@@ -471,6 +471,7 @@ fn projection_is_bounded_to_backend_target_capacity() {
         debug: false,
         apps,
         settings: Settings::default(),
+        ipv6_prefix_rules: Vec::new(),
     };
     let pm = (0..70)
         .map(|i| format!("package:com.example.{i:02} uid:{}", 10_000 + i))
@@ -539,5 +540,119 @@ fn kpm_readback_rejects_empty_or_wrong_kind_replies() {
             "vpnhide 1 status\nbackend 0x1\n".to_owned(),
         )
         .is_err(),
+    );
+}
+
+#[test]
+fn parses_and_projects_ipv6_prefix_rules() {
+    let cfg = parse_canonical(
+        r#"{
+          "version": 1,
+          "debug": true,
+          "ipv6PrefixRules": [
+            { "iface": "rmnet_data1", "prefix": "2401:4900::", "prefixLen": 32 },
+            { "iface": "wlan0", "prefix": "fe80::abcd", "prefixLen": 64 },
+            { "iface": "eth0", "prefix": "2401:4900:ABCD::", "prefixLen": 128 }
+          ]
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.ipv6_prefix_rules.len(), 3);
+    assert_eq!(cfg.ipv6_prefix_rules[0].prefix_len, 32);
+    // Prefix rules need no app targets and no package resolver at all.
+    assert_eq!(
+        project_native_with_resolver(&cfg, &PackageUidMap::default()),
+        "vpnhide 1 config\n\
+         debug 1\n\
+         prefix rmnet_data1 24014900000000000000000000000000 0x20\n\
+         prefix wlan0 fe80000000000000000000000000abcd 0x40\n\
+         prefix eth0 24014900abcd00000000000000000000 0x80\n",
+    );
+}
+
+#[test]
+fn prefix_rules_come_after_targets_on_the_wire() {
+    let cfg = parse_canonical(
+        r#"{
+          "version": 1,
+          "apps": { "com.example.app": { "native": true } },
+          "ipv6PrefixRules": [
+            { "iface": "rmnet_data1", "prefix": "2401:4900::", "prefixLen": 32 }
+          ]
+        }"#,
+    )
+    .unwrap();
+    let resolver = parse_pm_packages("package:com.example.app uid:10123\n");
+    assert_eq!(
+        project_native_with_resolver(&cfg, &resolver),
+        "vpnhide 1 config\n\
+         debug 0\n\
+         target 0x278b 0x3ff\n\
+         prefix rmnet_data1 24014900000000000000000000000000 0x20\n",
+    );
+}
+
+#[test]
+fn prefix_rule_validation_rejects_bad_entries() {
+    // 16-char iface (IFNAMSIZ is 16 incl. NUL).
+    assert!(
+        parse_canonical(
+            r#"{ "ipv6PrefixRules": [ { "iface": "abcdefghijklmnop", "prefix": "2401:4900::", "prefixLen": 32 } ] }"#,
+        )
+        .is_err(),
+    );
+    // iface with a space would corrupt the space-joined wire line.
+    assert!(
+        parse_canonical(
+            r#"{ "ipv6PrefixRules": [ { "iface": "rmnet data1", "prefix": "2401:4900::", "prefixLen": 32 } ] }"#,
+        )
+        .is_err(),
+    );
+    // Not an IPv6 address.
+    assert!(
+        parse_canonical(
+            r#"{ "ipv6PrefixRules": [ { "iface": "rmnet_data1", "prefix": "2401:4900", "prefixLen": 32 } ] }"#,
+        )
+        .is_err(),
+    );
+    // prefixLen out of range.
+    assert!(
+        parse_canonical(
+            r#"{ "ipv6PrefixRules": [ { "iface": "rmnet_data1", "prefix": "2401:4900::", "prefixLen": 129 } ] }"#,
+        )
+        .is_err(),
+    );
+    // Missing prefixLen is a hard error (a defaulted 0 would hide everything).
+    assert!(
+        parse_canonical(
+            r#"{ "ipv6PrefixRules": [ { "iface": "rmnet_data1", "prefix": "2401:4900::" } ] }"#,
+        )
+        .is_err(),
+    );
+}
+
+#[test]
+fn prefix_projection_is_bounded_to_backend_capacity() {
+    let rules = (0..10)
+        .map(|i| {
+            format!("{{ \"iface\": \"if{i}\", \"prefix\": \"2401:4900::\", \"prefixLen\": 32 }}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cfg = parse_canonical(&format!("{{ \"ipv6PrefixRules\": [ {rules} ] }}")).unwrap();
+    let wire = project_native_with_resolver(&cfg, &PackageUidMap::default());
+    assert_eq!(
+        wire.lines().filter(|line| line.starts_with("prefix ")).count(),
+        8
+    );
+}
+
+#[test]
+fn empty_prefix_rule_list_changes_nothing() {
+    let cfg = parse_canonical(r#"{ "version": 1, "debug": false }"#).unwrap();
+    assert!(cfg.ipv6_prefix_rules.is_empty());
+    assert_eq!(
+        project_native_with_resolver(&cfg, &PackageUidMap::default()),
+        "vpnhide 1 config\ndebug 0\n",
     );
 }

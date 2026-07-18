@@ -11,6 +11,8 @@ pub struct CanonicalConfig {
     pub apps: BTreeMap<String, AppConfig>,
     #[serde(default)]
     pub settings: Settings,
+    #[serde(default)]
+    pub ipv6_prefix_rules: Vec<Ipv6PrefixRule>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -18,6 +20,14 @@ pub struct CanonicalConfig {
 pub struct Settings {
     #[serde(default)]
     pub remember_superkey: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Ipv6PrefixRule {
+    pub iface: String,
+    pub prefix: String,
+    pub prefix_len: u8,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -259,6 +269,7 @@ pub fn parse_canonical(json: &str) -> Result<CanonicalConfig> {
         return Err(format!("unsupported vpnhide config version {}", cfg.version).into());
     }
     validate_port_policies(&cfg)?;
+    validate_ipv6_prefix_rules(&cfg)?;
     Ok(cfg)
 }
 
@@ -283,6 +294,39 @@ fn validate_port_policies(cfg: &CanonicalConfig) -> Result<()> {
     Ok(())
 }
 
+fn validate_ipv6_prefix_rules(cfg: &CanonicalConfig) -> Result<()> {
+    for rule in &cfg.ipv6_prefix_rules {
+        // The wire space-joins tokens, so an iface must be a single printable
+        // ASCII token of 1..=15 chars (mirrors the parser's parse_ifname, and
+        // IFNAMSIZ-1); anything else would corrupt or be rejected on the wire.
+        if rule.iface.is_empty()
+            || rule.iface.len() > 15
+            || !rule.iface.bytes().all(|b| (0x21..=0x7e).contains(&b))
+        {
+            return Err(format!(
+                "{}: ipv6PrefixRules.iface must be 1..15 printable ASCII chars, no spaces",
+                rule.iface
+            )
+            .into());
+        }
+        if rule.prefix.parse::<std::net::Ipv6Addr>().is_err() {
+            return Err(format!(
+                "{}: ipv6PrefixRules.prefix must be a valid IPv6 address",
+                rule.prefix
+            )
+            .into());
+        }
+        if rule.prefix_len > 128 {
+            return Err(format!(
+                "{}: ipv6PrefixRules.prefixLen must be within 0..=128",
+                rule.iface
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
 pub fn project_native(json: &str) -> Result<String> {
     project_native_with_pm_wait(
         json,
@@ -298,12 +342,47 @@ pub(crate) fn project_native_with_pm_wait(
 ) -> Result<String> {
     let cfg = parse_canonical(json)?;
     if !has_native_targets(&cfg, family) {
-        return Ok(format_config(cfg.debug, &[]));
+        // No app targets: still emit any global prefix rules via the one
+        // projector path (they need no package resolver).
+        return Ok(project_native_with_resolver_for_family(
+            &cfg,
+            &PackageUidMap::default(),
+            family,
+        ));
     }
     let resolver = PackageUidMap::from_pm_with_wait(wait)?;
     Ok(project_native_with_resolver_for_family(
         &cfg, &resolver, family,
     ))
+}
+
+/// Project validated JSON rules to wire `PrefixRule`s (colon-notation →
+/// 16 network-order bytes). Bounded by MAX_PREFIX_RULES; over-cap warns and
+/// truncates (mirrors the native-target cap above) instead of failing the
+/// whole activation.
+fn project_prefix_rules(rules: &[Ipv6PrefixRule]) -> Vec<PrefixRule> {
+    if rules.len() > MAX_PREFIX_RULES {
+        eprintln!(
+            "vpnhide: WARNING: {} ipv6PrefixRules exceed the backend cap of {}; \
+             dropping the {} last rule(s)",
+            rules.len(),
+            MAX_PREFIX_RULES,
+            rules.len() - MAX_PREFIX_RULES,
+        );
+    }
+    rules
+        .iter()
+        .take(MAX_PREFIX_RULES)
+        .map(|rule| PrefixRule {
+            ifname: rule.iface.clone(),
+            addr: rule
+                .prefix
+                .parse::<std::net::Ipv6Addr>()
+                .map(|v6| v6.octets())
+                .unwrap_or([0u8; 16]), // unreachable: parse_canonical validated
+            prefix_len: rule.prefix_len,
+        })
+        .collect()
 }
 
 pub(crate) fn project_native_with_resolver_for_family(
@@ -341,7 +420,8 @@ pub(crate) fn project_native_with_resolver_for_family(
         .take(MAX_NATIVE_TARGETS)
         .map(|(uid, hookmask)| Target { uid, hookmask })
         .collect::<Vec<_>>();
-    format_config(cfg.debug, &targets)
+    let prefixes = project_prefix_rules(&cfg.ipv6_prefix_rules);
+    format_config_ex(cfg.debug, &targets, &prefixes)
 }
 
 pub fn project_native_with_resolver(cfg: &CanonicalConfig, resolver: &PackageUidMap) -> String {

@@ -26,6 +26,13 @@ pub const PROTO_VERSION: u32 = 1;
 /// keep all three in sync.
 pub const MAX_TARGET_UIDS: usize = 64;
 
+/// Maximum number of `prefix` records a native backend will store. The kernel
+/// backend keeps a fixed `prefix_rules[MAX_PREFIX_RULES]` array, so a config
+/// carrying more rules is truncated on projection (with a warning). Single
+/// source of truth on the wire boundary; the C backends mirror it as
+/// `#define MAX_PREFIX_RULES` in kmod/shared/vpnhide_logic.h — keep in sync.
+pub const MAX_PREFIX_RULES: usize = 8;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Kind {
     Config,
