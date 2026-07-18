@@ -1053,14 +1053,10 @@ static int ipv6_route_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	data->target = hook_active(VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW) ||
 		       READ_ONCE(prefix_rules_present);
 
-	if (data->target && data->seq) {
+	if (data->target && data->seq)
 		data->start_count = data->seq->count;
-		vpnhide_dbg("ipv6_route_entry: uid=%u target=1\n",
-			    from_kuid(&init_user_ns, current_uid()));
-	} else {
+	else
 		data->start_count = 0;
-	}
-
 	return 0;
 }
 
