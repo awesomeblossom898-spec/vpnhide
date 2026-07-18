@@ -268,12 +268,13 @@ static void test_compact_if_inet6_vpn_and_edges(void)
 	rules[0].addr[3] = 0x00;
 	rules[0].prefix_len = 32;
 
-	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf), match_vpn, rules,
-					   1);
+	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf), match_vpn,
+					   rules, 1);
 	buf[n] = '\0';
 	expect_str(
 		"if_inet6: vpn tun0 + prefix removed, no-trailing-newline kept",
-		buf, "24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3");
+		buf,
+		"24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3");
 
 	/* Case B: bytes before `start` are never touched (even a VPN line); the
 	 * tun0 line after start is removed by vpn_match (rules unused here). */
