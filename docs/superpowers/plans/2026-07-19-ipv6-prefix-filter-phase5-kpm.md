@@ -226,7 +226,7 @@ In `snapshot_stats`, at the END of the function (after the per-uid double loop, 
 
 (`hook` is already declared at the top of `snapshot_stats` — reuse it, no redeclaration.)
 
-- [ ] **Step 3: seqlock-consistent match helper** — after `iface_is_vpn`/`netdev_name` helpers (before `kpm_is_public_host_route4`), add:
+- [ ] **Step 3: seqlock-consistent match helper** — after `iface_is_vpn`/`netdev_name` helpers (before `kpm_is_public_host_route4`), add (AMENDED 2026-07-19, commit 7f9c8a2 — final-review M1: shipped as `uint32_t s1, s2 = 0;` + `int hit = 0, i;`; an odd first `s1` can never equal 0, so the odd-first-iteration path always retries instead of risking an indeterminate return; same fix applied to `hook_active` and `kpm_snapshot_prefix_rules`):
 
 ```c
 /* True when a prefix rule on `ifname` covers `addr` (16 bytes). Seqlock read
@@ -410,7 +410,7 @@ git commit -m "kpm: hide prefix-covered v6 addresses in inet6_fill_ifaddr (uid-g
 
 Mirror of the `.ko`'s `ipv6_route_ret` (which itself mirrors `if6_seq_ret`): uid-gated rules snapshot + shared compactor + `vpn_match` ternary + stats split. The `before` callback (`fib_route_before`, shared with `fib_route_seq_show`) is stash-only — NO change needed there.
 
-- [ ] **Step 1: add the snapshot helper** — next to `kpm_prefix_rule_hit`, add:
+- [ ] **Step 1: add the snapshot helper** — next to `kpm_prefix_rule_hit`, add (AMENDED 2026-07-19, commit 7f9c8a2 — final-review M1: shipped as `uint32_t s1, s2 = 0;` + `int n = 0, i, j;`; this was the oops-class site — an indeterminate `n` would reach `vpnhide_compact_if_inet6_lines` as a loop bound over the 264 B stack `snap[]`):
 
 ```c
 /* Snapshot the prefix rules under the seqlock (even-seq reads, retry on a
