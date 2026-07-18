@@ -717,7 +717,7 @@ static void *deref2(void *base, unsigned int off1, unsigned int off2)
 /* The v4 addr-fill before-hook (inet6_fill_before is standalone — it also
  * runs the global prefix path; addr_fill_after_hook below remains genuinely
  * shared by both addr-fill hooks): stash skb + len if ifa's dev is VPN. The
- * caller passes its own hook id so the per-hook gate (§4.3) is per-hook. */
+ * caller passes the hook id so the per-hook gate (§4.3) is per-hook. */
 static void addr_fill_before(hook_fargs4_t *fargs, void *dev, uint32_t hook_id)
 {
 	void *skb = (void *)fargs->arg0;
