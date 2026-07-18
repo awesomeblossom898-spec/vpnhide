@@ -166,7 +166,7 @@ items.
 | `LinkProperties.getRoutes()` (Java) | framework route list | — | — | — | ✅ filter `mRoutes` | |
 
 The `.ko` additionally hides v6 route **destinations** covered by a global
-prefix rule — on `/proc/net/ipv6_route` and in RTM_GETROUTE v6 dumps — under
+prefix rule — on `/proc/net/ipv6_route` and in `RTM_GETROUTE` v6 dumps — under
 the same reader-uid gate as the address paths (3C); KPM and Zygisk do not
 implement prefix rules yet.
 
