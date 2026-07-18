@@ -1050,6 +1050,71 @@ static struct kretprobe ipv6_route_krp = {
 };
 
 /* ================================================================== */
+/*  Hook 11: if6_seq_show — /proc/net/if_inet6                        */
+/*                                                                    */
+/*  Per-iface IPv6 address list. Address is the FIRST field, devname  */
+/*  the LAST. We compact out lines that a VPN-iface match (per-uid)   */
+/*  or a global prefix rule covers, mirroring the ipv6_route strategy.*/
+/* ================================================================== */
+static int if6_seq_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct fib_route_data *data = (void *)ri->data;
+
+	data->seq = (struct seq_file *)regs->regs[0];
+	data->target = hook_active(VPNHIDE_HOOK_IF6_SEQ_SHOW) ||
+		       READ_ONCE(prefix_rules_present);
+
+	if (data->target && data->seq)
+		data->start_count = data->seq->count;
+	else
+		data->start_count = 0;
+	return 0;
+}
+
+static int if6_seq_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct fib_route_data *data = (void *)ri->data;
+	struct seq_file *seq = data->seq;
+	struct vpnhide_prefix_rule snap[MAX_PREFIX_RULES];
+	vpnhide_match_fn vpn_match;
+	unsigned long newc;
+	int np;
+
+	if (!data->target || !seq || !seq->buf)
+		return 0;
+	if (seq->count <= data->start_count)
+		return 0;
+
+	/* Snapshot prefix rules under the lock; the compactor is freestanding
+	 * and must not take kernel locks itself. */
+	spin_lock(&targets_lock);
+	np = nr_prefix_rules;
+	memcpy(snap, prefix_rules, (size_t)np * sizeof(*snap));
+	spin_unlock(&targets_lock);
+
+	/* VPN-iface hiding here is per-uid, like the other hooks. */
+	vpn_match = hook_active(VPNHIDE_HOOK_IF6_SEQ_SHOW) ?
+			    vpnhide_iface_is_vpn :
+			    (vpnhide_match_fn)0;
+
+	newc = vpnhide_compact_if_inet6_lines(seq->buf, data->start_count,
+					      seq->count, vpn_match, snap, np);
+	if (newc != seq->count) {
+		seq->count = newc;
+		record_hook_hit(VPNHIDE_HOOK_IF6_SEQ_SHOW);
+	}
+	return 0;
+}
+
+static struct kretprobe if6_seq_krp = {
+	.handler = if6_seq_ret,
+	.entry_handler = if6_seq_entry,
+	.data_size = sizeof(struct fib_route_data),
+	.maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
+	.kp.symbol_name = "if6_seq_show",
+};
+
+/* ================================================================== */
 /*  Route netlink helpers                                             */
 /* ================================================================== */
 
@@ -1465,6 +1530,7 @@ static struct kretprobe_reg probes[] = {
 	  false },
 	{ &ipv6_route_krp, "ipv6_route_seq_show",
 	  VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW, false },
+	{ &if6_seq_krp, "if6_seq_show", VPNHIDE_HOOK_IF6_SEQ_SHOW, false },
 	{ &fib_dump_krp, "fib_dump_info", VPNHIDE_HOOK_FIB_DUMP_INFO, false },
 	{ &rt6_fill_krp, "rt6_fill_node", VPNHIDE_HOOK_RT6_FILL_NODE, false },
 	{ &fib_rule_fill_krp, "fib_nl_fill_rule", VPNHIDE_HOOK_FIB_NL_FILL_RULE,
