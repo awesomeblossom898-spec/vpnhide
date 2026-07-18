@@ -165,10 +165,11 @@ items.
 | host-route to the VPN **server** | `/32`·`/128` to a public IP via a *physical* iface | ✅ `is_public_host_route_via_physical` | ✅ `kpm_is_public_host_route{4,6}` | — | — | |
 | `LinkProperties.getRoutes()` (Java) | framework route list | — | — | — | ✅ filter `mRoutes` | |
 
-The `.ko` additionally hides v6 route **destinations** covered by a global
-prefix rule — on `/proc/net/ipv6_route` and in `RTM_GETROUTE` v6 dumps — under
-the same reader-uid gate as the address paths (3C); KPM and Zygisk do not
-implement prefix rules yet.
+The kernel backends additionally hide v6 route **destinations** covered by a
+global prefix rule — on `/proc/net/ipv6_route` and in `RTM_GETROUTE` v6 dumps —
+under the same reader-uid gate as the address paths (3C). KPM implements the
+same prefix-rule hiding on its hooked paths (v6 addresses and both route paths,
+uid-gated); Zygisk does not implement prefix rules yet.
 
 The **`if<N>` leak (issue #86)** lived here: a hidden tun still has an index, and
 a route dump exposes that index even when the *name* is hidden, so the detector

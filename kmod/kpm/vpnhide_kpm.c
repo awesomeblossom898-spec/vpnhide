@@ -26,6 +26,8 @@
  *   - VPN-name matching from the generated single source of truth
  *     (../generated/iface_lists.h → data/interfaces.toml), incl. the `if<N>`
  *     pattern (issue #86) that the hardcoded community lists miss.
+ *   - Global IPv6 prefix rules: parsed from ctl0 config, uid-gated (app/shell
+ *     readers only), sentinel-uid global stats — parity with the .ko.
  *   - rt_fill_info (single-route lookup) is intentionally NOT hooked: the
  *     QEMU harness proved its arg→register ABI is unstable. soranerai hooks
  *     it; we don't.
@@ -712,9 +714,10 @@ static void *deref2(void *base, unsigned int off1, unsigned int off2)
 	return *(void **)((char *)p + off2);
 }
 
-/* Shared by both addr-fill hooks: stash skb + len if ifa's dev is VPN. The
- * caller passes its own hook id so the per-hook gate (§4.3) is per-hook even
- * though the body is shared. */
+/* The v4 addr-fill before-hook (inet6_fill_before is standalone — it also
+ * runs the global prefix path; addr_fill_after_hook below remains genuinely
+ * shared by both addr-fill hooks): stash skb + len if ifa's dev is VPN. The
+ * caller passes its own hook id so the per-hook gate (§4.3) is per-hook. */
 static void addr_fill_before(hook_fargs4_t *fargs, void *dev, uint32_t hook_id)
 {
 	void *skb = (void *)fargs->arg0;
@@ -1051,9 +1054,13 @@ static void fib_rule_after(hook_fargs8_t *fargs, void *udata)
  *
  *   fib_route_seq_show     /proc/net/route        ✓ (seq compactor)
  *   ipv6_route_seq_show    /proc/net/ipv6_route   ✓ (seq compactor)
+ *                                                   (+ global prefix rules,
+ *                                                   uid-gated)
  *   rtnl_fill_ifinfo       RTM_GETLINK            ✓ (skb.len)
  *   inet_fill_ifaddr       RTM_GETADDR v4         ✓ (in_ifaddr.ifa_dev->dev)
  *   inet6_fill_ifaddr      RTM_GETADDR v6         ✓ (inet6_ifaddr.idev->dev)
+ *                                                   (+ global prefix rules,
+ *                                                   uid-gated)
  *   dev_ioctl              SIOCGIF* by name       ✓ (ret -> -ENODEV)
  *   sock_ioctl             SIOCGIFCONF            ✓ (ifconf compaction)
  *   fib_dump_info          RTM_GETROUTE v4 dump   ✓ (#86; fib_info nexthop +
@@ -1070,6 +1077,8 @@ static void fib_rule_after(hook_fargs8_t *fargs, void *udata)
  *                                                   physical — A/B on every kver
  *                                                   5.10/5.15/6.1/6.12 + legacy
  *                                                   5.4/4.19/4.14)
+ *                                                   (+ global prefix rules,
+ *                                                   uid-gated)
  *   fib_nl_fill_rule       RTM_GETRULE            ✓ (fib_rule iif/oif/uid)
  *   ( rt_fill_info — intentionally NOT hooked; unstable arg->reg ABI )
  *
