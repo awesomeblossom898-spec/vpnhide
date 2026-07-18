@@ -404,19 +404,7 @@ internal fun canonicalConfigJson(config: CanonicalConfig): String =
         append(config.debugSwitch)
         append(",\n")
         if (config.ipv6PrefixRules.isNotEmpty()) {
-            append("  \"ipv6PrefixRules\": [\n")
-            config.ipv6PrefixRules.forEachIndexed { index, rule ->
-                append("    { \"iface\": ")
-                appendJsonString(rule.iface)
-                append(", \"prefix\": ")
-                appendJsonString(rule.prefix)
-                append(", \"prefixLen\": ")
-                append(rule.prefixLen)
-                append(" }")
-                if (index != config.ipv6PrefixRules.size - 1) append(',')
-                append('\n')
-            }
-            append("  ],\n")
+            appendIpv6PrefixRules(config.ipv6PrefixRules)
         }
         append("  \"apps\": {")
         val apps = config.apps.toSortedMap().filterValues { it.hasAnyRole }
@@ -455,6 +443,22 @@ internal fun canonicalConfigJson(config: CanonicalConfig): String =
         append("  }\n")
         append("}\n")
     }
+
+private fun StringBuilder.appendIpv6PrefixRules(rules: List<CanonicalIpv6PrefixRule>) {
+    append("  \"ipv6PrefixRules\": [\n")
+    rules.forEachIndexed { index, rule ->
+        append("    { \"iface\": ")
+        appendJsonString(rule.iface)
+        append(", \"prefix\": ")
+        appendJsonString(rule.prefix)
+        append(", \"prefixLen\": ")
+        append(rule.prefixLen)
+        append(" }")
+        if (index != rules.size - 1) append(',')
+        append('\n')
+    }
+    append("  ],\n")
+}
 
 private fun StringBuilder.appendCanonicalApp(app: CanonicalApp) {
     append("{ ")
