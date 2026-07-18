@@ -131,6 +131,11 @@ static DEFINE_SPINLOCK(targets_lock);
  * Mirrors the KPM's active_hook_mask. */
 static u32 active_hook_mask;
 
+static struct vpnhide_prefix_rule prefix_rules[MAX_PREFIX_RULES];
+static int nr_prefix_rules;
+/* Lock-free gate so the hot fill/seq paths skip the scan when no rule is set. */
+static bool prefix_rules_present;
+
 /* The enabled-hook mask for the calling UID (0 if it is not a target). */
 static u32 target_mask(void)
 {
@@ -157,6 +162,27 @@ static bool hook_active(u32 hook_id)
 	if (!(READ_ONCE(active_hook_mask) & (1u << hook_id)))
 		return false;
 	return (target_mask() & (1u << hook_id)) != 0;
+}
+
+/* Global (uid-independent) prefix match: true if `addr` on `ifname` is covered
+ * by any configured prefix rule. Reads prefix_rules[] under targets_lock. */
+static bool prefix_rule_hits(const char *ifname, const unsigned char addr[16])
+{
+	bool hit = false;
+	int i;
+
+	if (!READ_ONCE(prefix_rules_present) || !ifname)
+		return false;
+	spin_lock(&targets_lock);
+	for (i = 0; i < nr_prefix_rules; i++) {
+		if (vpnhide_streq(ifname, prefix_rules[i].ifname) &&
+		    vpnhide_prefix_match(addr, &prefix_rules[i])) {
+			hit = true;
+			break;
+		}
+	}
+	spin_unlock(&targets_lock);
+	return hit;
 }
 
 /* ------------------------------------------------------------------ */
@@ -231,7 +257,9 @@ static ssize_t ctl_write(struct file *file, const char __user *ubuf,
 {
 	char *buf;
 	struct vpnhide_target newt[MAX_TARGET_UIDS];
+	struct vpnhide_prefix_rule newp[MAX_PREFIX_RULES];
 	int n, dbg;
+	int np = 0;
 
 	if (count > PAGE_SIZE)
 		return -EINVAL;
@@ -249,7 +277,8 @@ static ssize_t ctl_write(struct file *file, const char __user *ubuf,
 	/* Seed `dbg` with the live value so an absent `debug` line means
 	 * "unchanged from current", per §4.3. */
 	dbg = READ_ONCE(debug_enabled) ? 1 : 0;
-	n = vpnhide_parse_config(buf, count, newt, MAX_TARGET_UIDS, &dbg);
+	n = vpnhide_parse_config_ex(buf, count, newt, MAX_TARGET_UIDS, &dbg,
+				    newp, MAX_PREFIX_RULES, &np);
 	kfree(buf);
 
 	/* A payload with no valid header / a too-new version is rejected
@@ -260,6 +289,9 @@ static ssize_t ctl_write(struct file *file, const char __user *ubuf,
 	spin_lock(&targets_lock);
 	memcpy(targets, newt, (size_t)n * sizeof(*targets));
 	nr_targets = n;
+	memcpy(prefix_rules, newp, (size_t)np * sizeof(*prefix_rules));
+	nr_prefix_rules = np;
+	WRITE_ONCE(prefix_rules_present, np > 0);
 	{
 		u32 mask = 0;
 		int i;
@@ -271,7 +303,8 @@ static ssize_t ctl_write(struct file *file, const char __user *ubuf,
 	spin_unlock(&targets_lock);
 	WRITE_ONCE(debug_enabled, dbg ? true : false);
 
-	pr_info(MODNAME ": config applied — %d targets, debug=%d\n", n, dbg);
+	pr_info(MODNAME ": config applied — %d targets, %d prefix rules, debug=%d\n",
+		n, np, dbg);
 	return count;
 }
 
