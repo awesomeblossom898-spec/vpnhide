@@ -24,11 +24,21 @@ internal object Protocol {
         val hookmask: Long,
     )
 
+    /** One `prefix <ifname> <addr32hex> <plen>` record (§4.3, global scope).
+     * [addrHex] is the normalised lowercase 32-hex form of the 16 network-order
+     * bytes (liberal-in case on the wire, normalised at parse). */
+    data class PrefixRule(
+        val ifname: String,
+        val addrHex: String,
+        val prefixLen: Long,
+    )
+
     /** A parsed config. [debug] is null when no `debug` line was present
      * ("unchanged from default", §4.3), else the flag. */
     data class Config(
         val debug: Boolean?,
         val targets: List<Target>,
+        val prefixes: List<PrefixRule>,
     )
 
     data class StatEntry(
@@ -98,6 +108,17 @@ internal object Protocol {
         return v.toLong()
     }
 
+    /** An interface-name token: 1..15 chars (record lines are already
+     * ASCII-clean). Empty or >= 16 → null. */
+    private fun parseIfname(tok: String): String? = tok.takeIf { it.isNotEmpty() && it.length < 16 }
+
+    /** The 16-byte prefix address: exactly 32 hex chars, liberal-in case,
+     * normalised lowercase-out (§4.4). */
+    private fun parseAddr32(tok: String): String? =
+        tok
+            .takeIf { t -> t.length == 32 && t.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' } }
+            ?.lowercase()
+
     /** Always lowercase out (§4.4: liberal-in / strict-out). Unsigned so a u64
      * value with the high bit set still renders correctly. */
     private fun hex(v: Long): String = "0x" + java.lang.Long.toUnsignedString(v, 16)
@@ -155,6 +176,7 @@ internal object Protocol {
         if (h.kind != Kind.CONFIG) return null
         var debug: Boolean? = null
         val targets = mutableListOf<Target>()
+        val prefixes = mutableListOf<PrefixRule>()
         forEachRecord(h.records) { toks ->
             when (toks.getOrNull(0)) {
                 "debug" -> {
@@ -176,9 +198,18 @@ internal object Protocol {
                     val hm = toks.getOrNull(2)?.let { parseHex(it, 32) }
                     if (uid != null && hm != null) setTarget(targets, uid, hm)
                 }
+
+                "prefix" -> {
+                    val ifname = toks.getOrNull(1)?.let(::parseIfname)
+                    val addr = toks.getOrNull(2)?.let(::parseAddr32)
+                    val plen = toks.getOrNull(3)?.let { parseHex(it, 32) }
+                    if (ifname != null && addr != null && plen != null && plen <= 128) {
+                        prefixes += PrefixRule(ifname, addr, plen)
+                    }
+                }
             }
         }
-        return Config(debug, targets)
+        return Config(debug, targets, prefixes)
     }
 
     private fun setTarget(
@@ -193,6 +224,7 @@ internal object Protocol {
     fun formatConfig(
         debug: Boolean?,
         targets: List<Target>,
+        prefixes: List<PrefixRule> = emptyList(),
     ): String =
         buildString {
             append("vpnhide ").append(VERSION).append(" config\n")
@@ -202,6 +234,15 @@ internal object Protocol {
                     .append(hex(t.uid))
                     .append(' ')
                     .append(hex(t.hookmask))
+                    .append('\n')
+            }
+            for (p in prefixes) {
+                append("prefix ")
+                    .append(p.ifname)
+                    .append(' ')
+                    .append(p.addrHex)
+                    .append(' ')
+                    .append(hex(p.prefixLen))
                     .append('\n')
             }
         }

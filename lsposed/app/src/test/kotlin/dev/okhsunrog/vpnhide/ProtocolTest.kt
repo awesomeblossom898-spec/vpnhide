@@ -93,6 +93,7 @@ class ProtocolTest {
             buildString {
                 append("debug=").append(dbg)
                 for (t in cfg.targets) append(";0x").append(t.uid.toString(16)).append(":0x").append(t.hookmask.toString(16))
+                for (p in cfg.prefixes) append(";pfx:").append(p.ifname).append(':').append(p.addrHex).append(':').append(p.prefixLen)
             }
         assertEquals("cfg <$input>", expect, got)
     }
@@ -174,5 +175,20 @@ class ProtocolTest {
         // debug omitted ⇒ null on parse.
         val reparsed = requireNotNull(Protocol.parseConfig(Protocol.formatConfig(null, targets)))
         assertNull(reparsed.debug)
+        // prefix records round-trip too (arbitrary masks above are intentional fixtures).
+        val withPrefixes =
+            Protocol.formatConfig(
+                debug = true,
+                targets = targets,
+                prefixes = listOf(Protocol.PrefixRule("rmnet_data1", "24014900000000000000000000000000", 32)),
+            )
+        assertEquals(
+            "vpnhide 1 config\ndebug 1\ntarget 0x27fa 0x3ff\ntarget 0x2947 0x4\nprefix rmnet_data1 24014900000000000000000000000000 0x20\n",
+            withPrefixes,
+        )
+        assertEquals(
+            listOf(Protocol.PrefixRule("rmnet_data1", "24014900000000000000000000000000", 32)),
+            requireNotNull(Protocol.parseConfig(withPrefixes)).prefixes,
+        )
     }
 }
