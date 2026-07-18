@@ -854,8 +854,9 @@ static int inet6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 			data->saved_len = data->skb ? data->skb->len : 0;
 			data->should_filter = true;
 			data->uid_target = vpn_active;
-			vpnhide_dbg("inet6_fill_entry: iface=%s uid=%u -> filter\n",
-				    name, uid);
+			vpnhide_dbg(
+				"inet6_fill_entry: iface=%s uid=%u -> filter\n",
+				name, uid);
 		}
 	}
 	rcu_read_unlock();
@@ -1133,8 +1134,8 @@ static int if6_seq_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	 * networkstack) must keep seeing real addresses or network provisioning
 	 * wedges (on-device finding 2026-07-18). For other readers pass no rules
 	 * (np = 0); the per-uid vpn_match path below is unchanged. */
-	if (vpnhide_uid_prefix_filtered(from_kuid(&init_user_ns,
-						  current_uid()))) {
+	if (vpnhide_uid_prefix_filtered(
+		    from_kuid(&init_user_ns, current_uid()))) {
 		/* Snapshot prefix rules under the lock; the compactor is
 		 * freestanding and must not take kernel locks itself. */
 		spin_lock(&targets_lock);

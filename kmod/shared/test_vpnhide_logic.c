@@ -214,15 +214,15 @@ static void test_uid_prefix_filtered(void)
 	expect_int("uid 1", vpnhide_uid_prefix_filtered(1), 0);
 	expect_int("uid 1000 (system_server)",
 		   vpnhide_uid_prefix_filtered(1000), 0);
-	expect_int("uid 1073 (networkstack)",
-		   vpnhide_uid_prefix_filtered(1073), 0);
+	expect_int("uid 1073 (networkstack)", vpnhide_uid_prefix_filtered(1073),
+		   0);
 	expect_int("uid 1999", vpnhide_uid_prefix_filtered(1999), 0);
 	expect_int("uid 9999", vpnhide_uid_prefix_filtered(9999), 0);
 
 	/* The adb shell and every app uid (incl. isolated) ARE filtered. */
 	expect_int("uid 2000 (shell)", vpnhide_uid_prefix_filtered(2000), 1);
-	expect_int("uid 10000 (first app)",
-		   vpnhide_uid_prefix_filtered(10000), 1);
+	expect_int("uid 10000 (first app)", vpnhide_uid_prefix_filtered(10000),
+		   1);
 	expect_int("uid 10123", vpnhide_uid_prefix_filtered(10123), 1);
 	expect_int("uid 99000 (isolated start)",
 		   vpnhide_uid_prefix_filtered(99000), 1);
