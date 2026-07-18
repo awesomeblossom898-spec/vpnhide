@@ -793,30 +793,31 @@ static int inet6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct inet6_fill_data *data = (void *)ri->data;
 	struct inet6_ifaddr *ifa;
+	bool vpn_active = hook_active(VPNHIDE_HOOK_INET6_FILL_IFADDR);
+	bool prefix_on = READ_ONCE(prefix_rules_present);
 
 	data->should_filter = false;
 
-	if (!hook_active(VPNHIDE_HOOK_INET6_FILL_IFADDR))
+	if (!vpn_active && !prefix_on)
 		return 0;
 
 	ifa = (struct inet6_ifaddr *)regs->regs[1];
-	/*
-	 * The callers of inet6_fill_ifaddr() hold either rcu_read_lock()
-	 * (netlink dump path) or RTNL. We take rcu_read_lock() explicitly
-	 * so the kretprobe handler doesn't rely on that implicit guarantee.
-	 */
 	rcu_read_lock();
-	if (ifa && ifa->idev && ifa->idev->dev &&
-	    is_vpn_ifname(ifa->idev->dev->name)) {
-		data->skb = (struct sk_buff *)regs->regs[0];
-		data->saved_len = data->skb ? data->skb->len : 0;
-		data->should_filter = true;
-		vpnhide_dbg("inet6_fill_entry: uid=%u iface=%s -> filter\n",
-			    from_kuid(&init_user_ns, current_uid()),
-			    ifa->idev->dev->name);
+	if (ifa && ifa->idev && ifa->idev->dev) {
+		const char *name = ifa->idev->dev->name;
+		bool hit = (vpn_active && is_vpn_ifname(name)) ||
+			   (prefix_on &&
+			    prefix_rule_hits(name, ifa->addr.s6_addr));
+
+		if (hit) {
+			data->skb = (struct sk_buff *)regs->regs[0];
+			data->saved_len = data->skb ? data->skb->len : 0;
+			data->should_filter = true;
+			vpnhide_dbg("inet6_fill_entry: iface=%s -> filter\n",
+				    name);
+		}
 	}
 	rcu_read_unlock();
-
 	return 0;
 }
 
