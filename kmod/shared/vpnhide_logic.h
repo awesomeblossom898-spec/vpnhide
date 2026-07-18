@@ -330,6 +330,13 @@ struct vpnhide_prefix_rule {
 	unsigned char prefix_len; /* 0..128         */
 };
 
+/* Sentinel UID for the uid-independent global prefix-hit stats row: prefix-rule
+ * matches fired by non-target UIDs are reported under this uid, never in the
+ * per-UID stats table. Real Android app/system UIDs never reach (uid_t)-1 (the
+ * kernel invalid uid); on the wire this prints as 0xffffffff. Shared by both
+ * kernel backends — kept here (not per-backend) so the value can never drift. */
+#define VPNHIDE_GLOBAL_STATS_UID ((unsigned int)-1)
+
 /* one sparse `<hook_id>:<count>` stats cell for a given uid (§4.3). The
  * producer groups consecutive entries by uid; format_stats emits one line per
  * uid run. count is u64 cumulative-since-load (OPEN-3). */

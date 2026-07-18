@@ -200,10 +200,6 @@ static struct stats_row stats_rows[MAX_TARGET_UIDS];
 static int nr_stats_rows;
 static DEFINE_SPINLOCK(stats_lock);
 
-/* Sentinel UID for the uid-independent global prefix-hit stats row. Real
- * Android app/system UIDs never reach (uid_t)-1 (the kernel invalid uid). */
-#define VPNHIDE_GLOBAL_STATS_UID ((uid_t) - 1)
-
 /* Global (uid-independent) hook hits — prefix-rule matches fired by non-target
  * UIDs. Kept out of stats_rows[] so they never consume the per-UID table or
  * mask a real target's stats. Guarded by stats_lock. */
