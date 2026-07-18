@@ -87,6 +87,9 @@ Shape (illustrative):
       }
     }
   },
+  "ipv6PrefixRules": [
+    { "iface": "rmnet_data1", "prefix": "2401:4900::", "prefixLen": 32 }
+  ],
   "settings": {
     "rememberSuperkey": false
   }
@@ -139,6 +142,28 @@ source of truth for import/export and activation; `mode`/`preset` are UI metadat
 Each rule uses `protocol: "both" | "tcp" | "udp"`, `start`, and optional `end`
 (inclusive, `1..65535`). Presets may change in later app versions, but an exported
 config remains stable because it carries the resolved `rules`.
+
+`ipv6PrefixRules` (optional, top-level) holds the **global** IPv6 prefix-hiding
+rules — global across targets, not per-app. Each entry is
+`{ "iface", "prefix", "prefixLen" }`: `prefix` in colon notation (e.g.
+`"2401:4900::"`), `prefixLen` 0..128 and **required** (no default — a defaulted
+0 would hide everything). At most 8 rules; over-cap means the activator warns
+and truncates. The activator validates **strictly** — `iface` 1..15 printable
+ASCII with no spaces, `prefix` must parse as IPv6, `prefixLen` present and
+<= 128 — and any violation rejects the whole config write; the LSPosed app
+parses best-effort, skipping malformed entries on read and carrying valid ones
+through config rewrites. The activator emits the derived `prefix` records
+(protocol.md §4.3) for all native backends: the `.ko` acts on them, KPM/Zygisk
+parse-ignore. Like the wire record, prefix hiding is gated by reader uid — it
+applies only to apps (uid >= 10000, isolated uids included) and the adb shell
+(uid 2000), never to system readers, because hiding the device's own v6
+addresses from networkstack wedges IpClient provisioning and mobile data never
+validates. On mobile data the internet interface migrates across `rmnet_dataN`
+on re-bring-up (`rmnet_data2` → `rmnet_data3` observed within minutes on
+ColorOS 16/Qualcomm), so a config hiding a carrier internet prefix should
+cover all candidate ifaces (e.g. `rmnet_data0`-`rmnet_data3`). Per-iface
+scoping keeps IMS safe: the IMS /32 differs from the internet /32, so a
+blanket internet-prefix rule never touches IMS addresses.
 
 ---
 
@@ -264,8 +289,8 @@ A common confusion (they are *not* the same):
 - **`status`: `hooks <mask>`** — per-backend, what is *actually installed*: did all
   the backend's hooks register this boot? It is capability/health, not per-target.
   Lets the app show "requested vs active" and detect a partial install
-  (`error = partial_hooks`). So `hooks 0x3ff` in a status read means "all 10 kernel
-  hooks are installed in this backend", **not** "this target's hooks".
+  (`error = partial_hooks`). So `hooks 0x20003ff` in a status read means "all 11
+  kernel hooks are installed in this backend", **not** "this target's hooks".
 
 ### 5.2 Config and stats don't collide
 
@@ -275,7 +300,7 @@ emits status+stats (from separate counters). Example on the kmod node:
 
 ```sh
 # write config (kind=config) — kernel parses into targets[]+debug, nothing echoed
-# printf 'vpnhide 1 config\ndebug 0\ntarget 0x27fa 0x3ff\n' > /proc/vpnhide_ctl
+# printf 'vpnhide 1 config\ndebug 0\ntarget 0x27fa 0x20003ff\n' > /proc/vpnhide_ctl
 
 # read status+stats (kind=status, kind=stats) — never returns the config you wrote
 # cat /proc/vpnhide_ctl
@@ -283,7 +308,7 @@ emits status+stats (from separate counters). Example on the kmod node:
 vpnhide 1 status
 backend 0x0
 kver 0x6019d
-hooks 0x3ff
+hooks 0x20003ff
 error 0x0
 vpnhide 1 stats
 0x27fa 0x0:0x5 0x3:0xc 0x9:0x1

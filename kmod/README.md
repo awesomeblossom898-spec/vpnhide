@@ -65,8 +65,8 @@ On boot:
 adb shell su -c '/data/adb/modules/vpnhide_kmod/activator'
 
 # Or push a control-config snapshot straight to the kernel (docs/protocol.md):
-# header + folded debug flag + one target line per UID (0x3ff = all hooks).
-adb shell su -c 'printf "vpnhide 1 config\ndebug 0\ntarget 0x28b7 0x3ff\n" > /proc/vpnhide_ctl'
+# header + folded debug flag + one target line per UID (0x20003ff = all hooks).
+adb shell su -c 'printf "vpnhide 1 config\ndebug 0\ntarget 0x28b7 0x20003ff\n" > /proc/vpnhide_ctl'
 ```
 
 The app writes to **two layers** simultaneously:

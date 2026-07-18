@@ -234,6 +234,7 @@ over a non-ASCII first significant line to find a header on a later line.
 ```
 debug <flag>
 target <uid> <hookmask>
+prefix <ifname> <addr32hex> <plen_hex>
 ```
 
 - `debug <flag>` — `flag` is the literal `0` or `1`. At most one `debug` line;
@@ -246,6 +247,26 @@ target <uid> <hookmask>
   runs in the target's own process and could match either way) keys on `getuid()`
   for one grammar across all channels. The package→UID resolution is the
   producer's job (app / boot script), the same for all backends.
+- `prefix <ifname> <addr32hex> <plen_hex>` — one per IPv6 prefix rule;
+  **global** across targets (NOT per-app — there is no `uid` field). A v6
+  address on `ifname` whose first `plen` bits equal the rule's prefix is
+  hidden from the reader. `ifname` is 1..15 chars. `addr32hex` is exactly 32
+  hex chars with **no `0x` prefix** — a documented deviation from §4.4 (the
+  same contract as `/proc/net/if_inet6`), liberal-in case on read,
+  lowercase-normalized on write. `plen_hex` is a normal §4.4 value,
+  `0x0`..`0x80` (0..128); `> 0x80` ⇒ skip the line, as does any malformation
+  (the §4.5 skip philosophy). The kernel stores at most `MAX_PREFIX_RULES`
+  (8) rules; over-cap ⇒ the activator warns on stderr and truncates.
+  **Reader-uid gate:** the filter applies only when the reading process is an
+  app (`uid >= 10000`, AID_APP — covers isolated uids) or the adb shell
+  (`uid == 2000`, AID_SHELL — keeps on-device verification feasible); system
+  readers (root 0, `system_server` 1000, `networkstack` 1073, …) ALWAYS see
+  the real addresses — hiding the device's own v6 addresses from
+  `networkstack` wedges IpClient provisioning and mobile data never
+  validates (verified on-device 2026-07-18). The gate applies ONLY to prefix
+  filtering — per-target VPN-interface hiding is unchanged. Backends that
+  don't implement prefix filtering parse-and-ignore the record safely (§4.5).
+  Producer convention: `prefix` lines come after `target` lines.
 
 **stats** (`kind = stats`):
 
@@ -257,6 +278,11 @@ target <uid> <hookmask>
   `hook_id:count` pairs are emitted. `hook_id` and `count` are hex; `count` is a
   `u64` **cumulative since the backend loaded** (OPEN-3) — reads never reset it,
   so two readers don't race and the app computes deltas itself.
+- Global prefix-filter hits (from `prefix` config rules, above) are attributed
+  to the sentinel uid `0xFFFFFFFF` (`VPNHIDE_GLOBAL_STATS_UID`), which has its
+  own counter array, so they never consume the 64-row per-uid stats table;
+  readers should treat that uid as "global, not attributable to one app".
+  (Per-target VPN hiding still attributes per real uid.)
 
 Asymmetry is deliberate: config uses a dense mask (a *set* over a small fixed
 universe, applied in the kernel in O(1)); stats uses sparse `id:count` (most
@@ -326,7 +352,7 @@ config (app → kernel):
 ```
 vpnhide 1 config
 debug 0
-target 0x27fa 0x3ff
+target 0x27fa 0x20003ff
 target 0x2947 0x004
 ```
 
@@ -419,7 +445,7 @@ the only writer of all profiles; each backend reads its own.
 | LSPosed | `debug`, `target` (lsposed-owned mask bits, incl. package visibility) | yes | yes |
 
 A backend ignores `target` mask bits it does not own (`mask & own_hooks`), so the
-same `target 0x27fa 0x3ff` line is valid on every channel and each backend takes
+same `target 0x27fa 0x20003ff` line is valid on every channel and each backend takes
 its slice.
 
 **Active vs idle (§1.5).** The grammar is the same on every channel, but the app
@@ -512,7 +538,7 @@ Write (multi-line payload as one argv argument):
 ```
 kpatch kpm ctl0 vpnhide "vpnhide 1 config
 debug 0
-target 0x27fa 0x3ff
+target 0x27fa 0x20003ff
 target 0x2947 0x004"
 ```
 

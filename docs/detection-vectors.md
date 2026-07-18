@@ -188,13 +188,14 @@ cheap and correct when such a route is present; see issue discussion.
 |---|---|:--:|:--:|:--:|:--:|:--:|
 | `/proc/net/tcp` | local addr hex per socket | — | — | ✅ `filter_tcp4_buf` (by VPN addr) | — | 🔒 often denied |
 | `/proc/net/tcp6` | 32-hex local addr | — | — | ✅ `filter_tcp6_buf` | — | 🔒 |
-| `/proc/net/if_inet6` | IPv6 addrs, iface last field | — | — | ✅ `filter_if_inet6_buf` | — | 🔒 |
+| `/proc/net/if_inet6` | IPv6 addrs, iface last field | ✅ `if6_seq_show` | — | ✅ `filter_if_inet6_buf` | — | 🔒 |
 
-These three are **Zygisk-only** today: kernel backends hide IPv6 addresses on
-the netlink `RTM_GETADDR` path but do **not** hook `if_inet6_seq_show`,
-`tcp4_seq_show`, or `tcp6_seq_show`, so the procfs equivalents leak under a
-raw-syscall reader that SELinux happens to allow. Candidate kernel-backend work
-if a real detector uses them.
+`/proc/net/if_inet6` is now covered by the `.ko` via `if6_seq_show` (hook 25),
+with the same hiding semantics as the netlink path (VPN ifname rules + prefix
+rules, uid-gated); KPM still does **not** hook it. `tcp4_seq_show` and
+`tcp6_seq_show` remain unhooked on both kernel backends, so the tcp/tcp6
+procfs equivalents still leak under a raw-syscall reader that SELinux happens
+to allow. Candidate kernel-backend work if a real detector uses them.
 
 ### 3D. Framework network APIs (Java) — lsposed territory
 
@@ -259,8 +260,9 @@ detectors actually probe:
   `recv`, `recvfrom`, `__recvfrom_chk`. A detector reading a netlink socket via
   plain `read()`/`readv()` or `recvmmsg` would slip past. Not seen in the wild
   yet; add hooks if it appears.
-- **Kernel-backend procfs gap:** no `if_inet6` / `tcp` / `tcp6` seq-file hooks
-  in `.ko` or KPM (3C).
+- **Kernel-backend procfs gap:** `tcp` / `tcp6` seq-file hooks are absent on
+  both kernel backends; `if_inet6` is covered by the `.ko` (`if6_seq_show`)
+  but not by KPM (3C).
 - **KPM SIOCGIFCONF size-query gap:** KPM compacts the returned ifreq array but
   does not yet reduce the `ifc_req == NULL` size query the `.ko` handles (3A).
 - **Single-lookup route** (`rt_fill_info`) is intentionally unhooked — no stable
