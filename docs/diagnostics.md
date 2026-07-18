@@ -94,11 +94,13 @@ results. A `null` answer (no root) does not block.
 
 - **SELinux carries part of "protection", and it is invisible without the
   differential.** On both test kernels, 8 of 13 native probes "pass" under enforcing
-  *only* because SELinux denies the read. Three of those — `/proc/net/if_inet6`,
-  `/proc/net/dev`, `/sys/class/net` — have **no backend coverage at all** under a
-  kernel backend (no kernel hook exists for those procfs/sysfs paths, by design); on a
-  permissive device they leak `tun0`. This is why the permissive-SELinux warning
-  exists and why SELinux attribution is dev-facing, not a user alarm.
+  *only* because SELinux denies the read (measured before hook 25 — the `.ko` now
+  covers `/proc/net/if_inet6` itself via `if6_seq_show`; KPM does not). The paths
+  with **no kernel-backend coverage at all** are `/proc/net/dev` and
+  `/sys/class/net` on both kernel backends, plus `/proc/net/if_inet6` under KPM
+  (no kernel hook exists for those paths, by design); on a permissive device they
+  leak `tun0`. This is why the permissive-SELinux warning exists and why SELinux
+  attribution is dev-facing, not a user alarm.
 - **The VPN lives in protected sockets + per-UID policy tables, not the main route
   table.** A split-tunnel VPN app marks its sockets and installs `ip rule … uidrange
   <uid> lookup tun0`; it does *not* put a default route in the main table. So
@@ -114,9 +116,10 @@ results. A `null` answer (no root) does not block.
   used by diagnostics — the root differential already gives the full 4-way + `hidden`
   without them — and stay only in the Statistics tab.
 
-## 7. Native check → owning hook (KPM/kmod), verified on Pixel 4a
+## 7. Native check → owning hook (KPM/kmod), verified on Pixel 4a and Nord 3
 
-The kernel backend's 10 hooks map to the diagnostic checks below; the "gaps" rows are
+The kernel backend's hooks map to the diagnostic checks below (`.ko` 11 hooks, KPM
+10 — KPM has no `if6_seq_show`); the "gaps" rows are
 SELinux/zygisk territory by design, not bugs. Full hiding matrix in
 [detection-vectors.md](detection-vectors.md).
 
@@ -129,7 +132,7 @@ SELinux/zygisk territory by design, not bugs. Full hiding matrix in
 | `netlink_getrule` | RTM_GETRULE policy rules | `fib_nl_fill_rule` | v4+v6; kernel-only vector |
 | `proc_route` | `/proc/net/route` | `fib_route_seq_show` | main table — empty for split-tunnel VPN |
 | `proc_ipv6_route` | `/proc/net/ipv6_route` | `ipv6_route_seq_show` | |
-| `proc_if_inet6` | `/proc/net/if_inet6` | **(none)** | no kernel seq_show hook — zygisk `openat` or SELinux only |
+| `proc_if_inet6` | `/proc/net/if_inet6` | `if6_seq_show` (`.ko` only — KPM has none) | `.ko`: VPN-iface lines + global prefix rules, uid-gated; otherwise zygisk `openat` or SELinux |
 | `proc_dev` | `/proc/net/dev` | **(none)** | zygisk `openat` or SELinux only |
 | `sys_class_net` | `/sys/class/net` | **(none)** | SELinux only |
 
