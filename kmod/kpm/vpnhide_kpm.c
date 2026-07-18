@@ -347,6 +347,31 @@ static int kpm_prefix_rule_hit(const char *ifname, const unsigned char *addr)
 	return hit;
 }
 
+/* Snapshot the prefix rules under the seqlock (even-seq reads, retry on a
+ * concurrent write) and return the count. Byte-wise copy: the KP build
+ * environment has no guaranteed memcpy (same idiom as iface_is_vpn). */
+static int kpm_snapshot_prefix_rules(struct vpnhide_prefix_rule *snap)
+{
+	uint32_t s1, s2;
+	int n, i, j;
+
+	do {
+		s1 = __atomic_load_n(&cfg_seq, __ATOMIC_ACQUIRE);
+		if (s1 & 1u)
+			continue;
+		n = nr_prefix_rules;
+		for (i = 0; i < n; i++) {
+			const char *src = (const char *)&prefix_rules[i];
+			char *dst = (char *)&snap[i];
+
+			for (j = 0; j < (int)sizeof(*snap); j++)
+				dst[j] = src[j];
+		}
+		s2 = __atomic_load_n(&cfg_seq, __ATOMIC_ACQUIRE);
+	} while (s1 != s2);
+	return n;
+}
+
 /* True when `dev` (a route's output device) is physical AND the route is a
  * public /32 host-route — the route a VPN client pins to the uplink so tunnel
  * packets can reach the server, which leaks the server's public IPv4 even when
@@ -460,27 +485,53 @@ static void fib_route_after(hook_fargs2_t *fargs, void *udata)
 }
 
 /* ipv6_route_seq_show — /proc/net/ipv6_route. Same as fib_route but the iface
- * name is the LAST field. Shares fib_route_before (stashes seq->count). */
+ * name is the LAST field; also filters lines a global prefix rule covers
+ * (uid-gated snapshot below). Shares fib_route_before (stashes seq->count). */
 static void ipv6_route_after(hook_fargs2_t *fargs, void *udata)
 {
 	void *seq = (void *)fargs->arg0;
 	char *buf;
 	unsigned long *countp;
 	unsigned long start = (unsigned long)fargs->local.data0;
+	struct vpnhide_prefix_rule snap[MAX_PREFIX_RULES];
+	vpnhide_match_fn vpn_match;
+	int nr = 0;
 
-	if (!seq || !hook_active(VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW))
+	if (!seq)
+		return;
+
+	/* Same reader-uid gate as the .ko: prefix rules filter only app/shell
+	 * readers; system readers (e.g. networkstack) must keep seeing real
+	 * routes or network provisioning wedges (on-device finding 2026-07-18). */
+	if (vpnhide_uid_prefix_filtered((unsigned int)current_uid()))
+		nr = kpm_snapshot_prefix_rules(snap);
+
+	vpn_match = hook_active(VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW) ?
+			    iface_is_vpn :
+			    (vpnhide_match_fn)0;
+	if (!vpn_match && nr == 0)
 		return;
 
 	buf = *(char **)((char *)seq + off->seqfile_buf);
 	countp = (unsigned long *)((char *)seq + off->seqfile_count);
 	{
 		unsigned long old = *countp;
-		unsigned long next = vpnhide_compact_seq_lines(
-			buf, start, old, VPNHIDE_FIELD_LAST, iface_is_vpn);
+		/* /proc/net/ipv6_route keeps the route destination in the FIRST
+		 * field and the iface name in the LAST — the same two fields the
+		 * if_inet6 compactor tokenizes, so it doubles as the route
+		 * compactor (host-test-pinned in the .ko's suite). */
+		unsigned long next = vpnhide_compact_if_inet6_lines(
+			buf, start, old, vpn_match, snap, nr);
 
 		*countp = next;
-		if (next != old)
-			record_hook_hit(VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW);
+		if (next != old) {
+			if (vpn_match)
+				record_hook_hit(
+					VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW);
+			else
+				record_global_hook_hit(
+					VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW);
+		}
 	}
 }
 
