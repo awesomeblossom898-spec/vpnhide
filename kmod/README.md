@@ -20,7 +20,7 @@ Zero footprint in the target app's process -- no modified function prologues, no
 | `fib_nl_fill_rule` | Trims target-UID policy rules and VPN interface rules from netlink rule dumps via `skb_trim` | RTM_GETRULE policy routing dumps |
 | `if6_seq_show` | Forward-scans for VPN-interface and global prefix-rule IPv6 address lines and compacts them out | `/proc/net/if_inet6` reads |
 
-All filtering is **per-UID**: only processes whose UID is a `target` in the config written to `/proc/vpnhide_ctl` see the filtered view. Everyone else (system services, VPN client, NFC subsystem) sees the real data.
+VPN-interface filtering is **per-UID**: only processes whose UID is a `target` in the config written to `/proc/vpnhide_ctl` see the filtered view. Global IPv6 prefix rules are different: they hide from every app (uid >= 10000) and the adb shell (uid 2000), target or not. System readers (system services, VPN client, NFC subsystem) always see the real data.
 
 ## Why kernel-level?
 
