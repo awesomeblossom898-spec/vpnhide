@@ -46,7 +46,8 @@ private fun NativeCheckSpec.hasHookIn(mask: Int): Boolean = expectedHooks.any { 
  * (has a hook for). A leak on a not-owned vector (e.g. /proc/net/dev under a
  * kernel backend — no kernel hook exists) is out of scope for the tile; it
  * surfaces via the hero instead. Kernel backends (kmod/KPM) own kernel-hook
- * vectors; Zygisk owns zygisk-hook vectors.
+ * vectors, per their own masks (the KPM set lacks if6_seq_show); Zygisk owns
+ * zygisk-hook vectors.
  */
 internal fun summarizeNativeLayer(
     backend: DisplayNativeBackend,
@@ -56,7 +57,8 @@ internal fun summarizeNativeLayer(
     if (!moduleActive(backend.state)) return LayerStatus.Inactive
     val ownMask =
         when (backend.id) {
-            NativeBackendId.Kmod, NativeBackendId.Kpm -> HookIds.KERNEL_HOOK_MASK
+            NativeBackendId.Kmod -> HookIds.KERNEL_HOOK_MASK
+            NativeBackendId.Kpm -> HookIds.KPM_HOOK_MASK
             NativeBackendId.Zygisk -> HookIds.ZYGISK_HOOK_MASK
             null -> HookIds.KERNEL_HOOK_MASK
         }
@@ -98,8 +100,10 @@ internal fun unownedNativeLeaks(
     if (backend.state !is ModuleState.Installed || !moduleActive(backend.state)) return 0
     val ownMask =
         when (backend.id) {
+            NativeBackendId.Kmod -> HookIds.KERNEL_HOOK_MASK
+            NativeBackendId.Kpm -> HookIds.KPM_HOOK_MASK
             NativeBackendId.Zygisk -> HookIds.ZYGISK_HOOK_MASK
-            else -> HookIds.KERNEL_HOOK_MASK
+            null -> HookIds.KERNEL_HOOK_MASK
         }
     val ownedIds = NATIVE_CHECKS.filter { it.hasHookIn(ownMask) }.map { it.id }.toSet()
     return outcomes.count { (id, outcome) -> outcome is CheckOutcome.Leak && id !in ownedIds }

@@ -115,12 +115,13 @@ internal val NATIVE_CHECKS: List<NativeCheckSpec> =
             expectedHooks = setOf(HookIds.Hook.IPV6_ROUTE_SEQ_SHOW, HookIds.Hook.ZYGISK_OPENAT),
         ),
         NativeCheckSpec(
-            // No kernel seq_show hook exists for /proc/net/if_inet6 — INET6_FILL_IFADDR
-            // covers the netlink RTM_GETADDR path, not this procfs read. So a kernel
-            // backend does not own this vector; only the zygisk openat filter (or SELinux).
+            // The .ko owns this vector via if6_seq_show (VPN-iface lines + global
+            // prefix rules, uid-gated). KPM has no if_inet6 hook, so there only the
+            // zygisk openat filter (or SELinux) covers it. INET6_FILL_IFADDR covers
+            // the netlink RTM_GETADDR path, not this procfs read.
             id = "proc_if_inet6",
             labelRes = R.string.check_proc_if_inet6,
-            expectedHooks = setOf(HookIds.Hook.ZYGISK_OPENAT),
+            expectedHooks = setOf(HookIds.Hook.IF6_SEQ_SHOW, HookIds.Hook.ZYGISK_OPENAT),
         ),
         NativeCheckSpec(
             id = "proc_dev",

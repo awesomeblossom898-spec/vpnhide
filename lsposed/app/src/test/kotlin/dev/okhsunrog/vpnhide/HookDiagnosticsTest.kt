@@ -1,5 +1,6 @@
 package dev.okhsunrog.vpnhide
 
+import dev.okhsunrog.vpnhide.generated.HookIds
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -37,5 +38,18 @@ class HookDiagnosticsTest {
         )
         // current=0 (unsigned 0) is below baseline=-1 (unsigned ULong.MAX) → reset.
         assertEquals("reset", counterDeltaText(current = 0, baseline = -1L, hasBaseline = true))
+    }
+
+    @Test
+    fun `if6_seq_show is owned by the kmod only - KPM has no if_inet6 hook`() {
+        // The .ko owns /proc/net/if_inet6 via if6_seq_show; the KPM-owned set
+        // (KPM_HOOK_MASK) lacks it. Listing KPM as an owner would print
+        // "KPM:missing" for a hook KPM can never install.
+        assertEquals(listOf(HookIds.Backend.KMOD), hookOwners(HookIds.Hook.IF6_SEQ_SHOW))
+        // A hook KPM does install is still co-owned by both kernel backends.
+        assertEquals(
+            listOf(HookIds.Backend.KMOD, HookIds.Backend.KPM),
+            hookOwners(HookIds.Hook.DEV_IOCTL),
+        )
     }
 }

@@ -408,6 +408,11 @@ libc hooks (7): `zygisk_ioctl`, `zygisk_getifaddrs`, `zygisk_openat`,
 `zygisk_recvmsg`, `zygisk_recv`, `zygisk_recvfrom`,
 `zygisk_recvfrom_chk`.
 
+The registry codegen emits two kernel-owned masks for this split:
+`KERNEL_HOOK_MASK` (`0x20003ff`, the `.ko` set) and `KPM_HOOK_MASK` (`0x3ff`).
+A kernel backend judges `partial_hooks` against its own owned mask, ignoring
+bits it does not own.
+
 ### 5.1 Error codes (`status`)
 
 A small fixed enum, codegen'd from the same registry TOML as the hooks, so the

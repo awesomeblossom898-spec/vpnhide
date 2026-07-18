@@ -16,6 +16,11 @@ class LayerStatusTest {
             NativeBackendStates(kmod = state, kpm = ModuleState.NotInstalled, zygisk = ModuleState.NotInstalled),
         )
 
+    private fun kpm(state: ModuleState) =
+        displayNativeBackend(
+            NativeBackendStates(kmod = ModuleState.NotInstalled, kpm = state, zygisk = ModuleState.NotInstalled),
+        )
+
     private fun zygisk(state: ModuleState) =
         displayNativeBackend(
             NativeBackendStates(kmod = ModuleState.NotInstalled, kpm = ModuleState.NotInstalled, zygisk = state),
@@ -95,6 +100,23 @@ class LayerStatusTest {
             summarizeNativeLayer(zygisk(installed(active = true)), outcomes),
         )
         assertEquals(1, unownedNativeLeaks(zygisk(installed(active = true)), outcomes))
+    }
+
+    @Test
+    fun `proc_if_inet6 leak counts against the kmod tile but not the KPM tile`() {
+        // if6_seq_show is .ko-only: the kmod owns /proc/net/if_inet6, the KPM has
+        // no if_inet6 hook. The same leak dents the kmod tile but not the KPM
+        // tile — under KPM it surfaces via the unowned-leak count (the hero).
+        val outcomes = mapOf("proc_if_inet6" to CheckOutcome.Leak)
+        assertEquals(
+            LayerStatus.Active(hidden = 0, leaks = 1),
+            summarizeNativeLayer(kmod(installed(active = true)), outcomes),
+        )
+        assertEquals(
+            LayerStatus.Active(hidden = 0, leaks = 0),
+            summarizeNativeLayer(kpm(installed(active = true)), outcomes),
+        )
+        assertEquals(1, unownedNativeLeaks(kpm(installed(active = true)), outcomes))
     }
 
     // ── java layer ─────────────────────────────────────────────────────────
