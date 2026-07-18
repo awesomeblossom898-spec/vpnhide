@@ -314,6 +314,14 @@ static int rt6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 			data->skb = (struct sk_buff *)regs->regs[1];
 			data->saved_len = data->skb ? data->skb->len : 0;
 			data->should_filter = true;
+			/* AMENDED post-merge (2eddc81, code-quality review):
+			 * shipped as `data->uid_target = active;` — "enabled"
+			 * semantics, uniform with inet6_fill (vpn_active) and
+			 * both seq hooks (vpn_match != NULL). The
+			 * `vpn_route || host_hint` ("fired") form below would
+			 * wrongly land a target reader's prefix-only hide in
+			 * the sentinel global row. Phase 5 (KPM) must mirror
+			 * `= active`. */
 			data->uid_target = vpn_route || host_hint;
 			vpnhide_dbg("rt6_fill_entry: hiding %s via %s\n",
 				    vpn_route ? "VPN route" :
