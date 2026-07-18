@@ -13,6 +13,7 @@ internal data class CanonicalConfig(
     val debugSwitch: Boolean = false,
     val apps: Map<String, CanonicalApp> = emptyMap(),
     val settings: CanonicalSettings = CanonicalSettings(),
+    val ipv6PrefixRules: List<CanonicalIpv6PrefixRule> = emptyList(),
 )
 
 internal data class CanonicalSettings(
@@ -21,6 +22,12 @@ internal data class CanonicalSettings(
     val autoHideVpnName: Boolean = false,
     val autoHideExcludedPackages: Set<String> = emptySet(),
     val autoHiddenPackages: Set<String> = emptySet(),
+)
+
+internal data class CanonicalIpv6PrefixRule(
+    val iface: String,
+    val prefix: String,
+    val prefixLen: Int,
 )
 
 internal data class CanonicalApp(
@@ -154,6 +161,7 @@ internal fun parseCanonicalConfig(raw: String): CanonicalConfig? {
                 autoHideExcludedPackages = parseStringSet(settingsJson?.optJSONArray("autoHideExcludedPackages")),
                 autoHiddenPackages = parseStringSet(settingsJson?.optJSONArray("autoHiddenPackages")),
             ),
+        ipv6PrefixRules = parseIpv6PrefixRules(root),
     )
 }
 
@@ -208,6 +216,26 @@ private fun parsePortRule(obj: JSONObject): PortRule {
         start = start,
         end = end,
     )
+}
+
+private fun parseIpv6PrefixRules(root: JSONObject): List<CanonicalIpv6PrefixRule> {
+    val array = root.optJSONArray("ipv6PrefixRules") ?: return emptyList()
+    // Best-effort, same philosophy as parsePortPolicy: one malformed entry must
+    // not throw and unwind the WHOLE canonical config — skip it and keep the
+    // valid siblings. Strict validation (IPv6-ness, printable-ASCII iface) is
+    // the activator's job at projection time, not the writer's.
+    return (0 until array.length()).mapNotNull { idx ->
+        val obj = array.optJSONObject(idx) ?: return@mapNotNull null
+        runCatching {
+            val iface = obj.optString("iface", "")
+            val prefix = obj.optString("prefix", "")
+            val prefixLen = obj.optInt("prefixLen", -1)
+            require(iface.isNotBlank() && iface.length < 16) { "bad iface" }
+            require(prefix.isNotBlank()) { "bad prefix" }
+            require(prefixLen in 0..128) { "bad prefixLen" }
+            CanonicalIpv6PrefixRule(iface, prefix, prefixLen)
+        }.getOrNull()
+    }
 }
 
 private fun parseNativeRole(value: Any?): NativeRole =
@@ -317,6 +345,7 @@ internal fun buildCanonicalConfig(
         debugSwitch = debugSwitch ?: existing?.debugSwitch ?: debug,
         apps = apps,
         settings = existing?.settings ?: CanonicalSettings(),
+        ipv6PrefixRules = existing?.ipv6PrefixRules ?: emptyList(),
     )
 }
 
@@ -374,6 +403,21 @@ internal fun canonicalConfigJson(config: CanonicalConfig): String =
         append("  \"debugSwitch\": ")
         append(config.debugSwitch)
         append(",\n")
+        if (config.ipv6PrefixRules.isNotEmpty()) {
+            append("  \"ipv6PrefixRules\": [\n")
+            config.ipv6PrefixRules.forEachIndexed { index, rule ->
+                append("    { \"iface\": ")
+                appendJsonString(rule.iface)
+                append(", \"prefix\": ")
+                appendJsonString(rule.prefix)
+                append(", \"prefixLen\": ")
+                append(rule.prefixLen)
+                append(" }")
+                if (index != config.ipv6PrefixRules.size - 1) append(',')
+                append('\n')
+            }
+            append("  ],\n")
+        }
         append("  \"apps\": {")
         val apps = config.apps.toSortedMap().filterValues { it.hasAnyRole }
         if (apps.isNotEmpty()) append('\n')

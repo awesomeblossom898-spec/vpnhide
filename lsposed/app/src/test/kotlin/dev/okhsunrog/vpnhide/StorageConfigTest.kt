@@ -376,6 +376,90 @@ class StorageConfigTest {
     }
 
     @Test
+    fun `canonical config parses ipv6 prefix rules and skips malformed entries`() {
+        val cfg =
+            requireNotNull(
+                parseCanonicalConfig(
+                    """
+                    {
+                      "version": 1,
+                      "apps": {},
+                      "ipv6PrefixRules": [
+                        { "iface": "tun0", "prefix": "2001:db8::", "prefixLen": 64 },
+                        { "iface": "rmnet_data1", "prefix": "2401:4900::", "prefixLen": 32 },
+                        { "iface": "tun1", "prefix": "2001:db8::", "prefixLen": 129 },
+                        { "iface": "sixteen_char_if0", "prefix": "fd00::", "prefixLen": 8 }
+                      ]
+                    }
+                    """.trimIndent(),
+                ),
+            )
+
+        assertEquals(
+            listOf(
+                CanonicalIpv6PrefixRule(iface = "tun0", prefix = "2001:db8::", prefixLen = 64),
+                CanonicalIpv6PrefixRule(iface = "rmnet_data1", prefix = "2401:4900::", prefixLen = 32),
+            ),
+            cfg.ipv6PrefixRules,
+        )
+
+        val withoutKey =
+            requireNotNull(
+                parseCanonicalConfig(
+                    """
+                    {
+                      "version": 1,
+                      "apps": {}
+                    }
+                    """.trimIndent(),
+                ),
+            )
+
+        assertEquals(emptyList<CanonicalIpv6PrefixRule>(), withoutKey.ipv6PrefixRules)
+    }
+
+    @Test
+    fun `canonical json round trips ipv6 prefix rules`() {
+        val cfg =
+            CanonicalConfig(
+                ipv6PrefixRules =
+                    listOf(
+                        CanonicalIpv6PrefixRule(iface = "tun0", prefix = "2001:db8::", prefixLen = 64),
+                        CanonicalIpv6PrefixRule(iface = "rmnet_data1", prefix = "2401:4900::", prefixLen = 32),
+                    ),
+            )
+
+        val json = canonicalConfigJson(cfg)
+
+        assertTrue(json.contains("\"ipv6PrefixRules\""))
+        assertEquals(cfg, requireNotNull(parseCanonicalConfig(json)))
+        assertTrue(!canonicalConfigJson(CanonicalConfig()).contains("\"ipv6PrefixRules\""))
+    }
+
+    @Test
+    fun `builder preserves ipv6 prefix rules when rebuilding`() {
+        val rules =
+            listOf(
+                CanonicalIpv6PrefixRule(iface = "tun0", prefix = "2001:db8::", prefixLen = 64),
+                CanonicalIpv6PrefixRule(iface = "rmnet_data1", prefix = "2401:4900::", prefixLen = 32),
+            )
+        val existing = CanonicalConfig(ipv6PrefixRules = rules)
+
+        val cfg =
+            buildCanonicalConfig(
+                debug = false,
+                javaPkgs = emptySet(),
+                nativePkgs = setOf("com.bank"),
+                hiddenPkgs = emptySet(),
+                observerPkgs = emptySet(),
+                portsPkgs = emptySet(),
+                existing = existing,
+            )
+
+        assertEquals(rules, cfg.ipv6PrefixRules)
+    }
+
+    @Test
     fun `canonical json serializes both debug flags`() {
         val cfg = CanonicalConfig(debug = true, debugSwitch = false)
         val json = canonicalConfigJson(cfg)
