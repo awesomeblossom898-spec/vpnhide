@@ -33,11 +33,11 @@ REGISTERED=$(dmesg | grep -c 'vpnhide:.*registered')
 echo "REGISTERED=$REGISTERED"
 
 # Write a control-protocol config snapshot (docs/protocol.md) enabling every
-# kernel hook (mask 0x3ff) for a single UID, with debug logging on. Replaces
+# kernel hook (mask 0x20003ff) for a single UID, with debug logging on. Replaces
 # the old `echo <uid> > /proc/vpnhide_targets` + `echo 1 > /proc/vpnhide_debug`
 # — both folded into the one /proc/vpnhide_ctl node.
 set_target() {
-	printf 'vpnhide 1 config\ndebug 1\ntarget 0x%x 0x3ff\n' "$1" \
+	printf 'vpnhide 1 config\ndebug 1\ntarget 0x%x 0x20003ff\n' "$1" \
 		> /proc/vpnhide_ctl 2>/dev/null
 }
 

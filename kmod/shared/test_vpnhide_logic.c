@@ -207,6 +207,30 @@ static void test_prefix_match(void)
 	expect_int("prefix /129 reject", vpnhide_prefix_match(a, &r), 0);
 }
 
+static void test_uid_prefix_filtered(void)
+{
+	/* System readers are NOT filtered — they must see real addresses. */
+	expect_int("uid 0 (root)", vpnhide_uid_prefix_filtered(0), 0);
+	expect_int("uid 1", vpnhide_uid_prefix_filtered(1), 0);
+	expect_int("uid 1000 (system_server)",
+		   vpnhide_uid_prefix_filtered(1000), 0);
+	expect_int("uid 1073 (networkstack)",
+		   vpnhide_uid_prefix_filtered(1073), 0);
+	expect_int("uid 1999", vpnhide_uid_prefix_filtered(1999), 0);
+	expect_int("uid 9999", vpnhide_uid_prefix_filtered(9999), 0);
+
+	/* The adb shell and every app uid (incl. isolated) ARE filtered. */
+	expect_int("uid 2000 (shell)", vpnhide_uid_prefix_filtered(2000), 1);
+	expect_int("uid 10000 (first app)",
+		   vpnhide_uid_prefix_filtered(10000), 1);
+	expect_int("uid 10123", vpnhide_uid_prefix_filtered(10123), 1);
+	expect_int("uid 99000 (isolated start)",
+		   vpnhide_uid_prefix_filtered(99000), 1);
+	expect_int("uid 99999", vpnhide_uid_prefix_filtered(99999), 1);
+	expect_int("uid 0xffffffff", vpnhide_uid_prefix_filtered(0xffffffffu),
+		   1);
+}
+
 static void test_compact_if_inet6(void)
 {
 	/* /proc/net/if_inet6: "<32hex addr> <ifindex> <plen> <scope> <flags> <name>" */
@@ -306,6 +330,7 @@ int main(void)
 	test_is_physical_iface();
 	test_parse_uids();
 	test_prefix_match();
+	test_uid_prefix_filtered();
 	test_compact_if_inet6();
 	test_compact_if_inet6_vpn_and_edges();
 

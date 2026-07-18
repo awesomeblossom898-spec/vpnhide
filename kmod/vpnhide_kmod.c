@@ -827,8 +827,14 @@ static int inet6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct inet6_fill_data *data = (void *)ri->data;
 	struct inet6_ifaddr *ifa;
+	uid_t uid = from_kuid(&init_user_ns, current_uid());
 	bool vpn_active = hook_active(VPNHIDE_HOOK_INET6_FILL_IFADDR);
-	bool prefix_on = READ_ONCE(prefix_rules_present);
+	/* Prefix rules filter only app/shell readers: system readers (e.g.
+	 * networkstack) must keep seeing real addresses or network provisioning
+	 * wedges (on-device finding 2026-07-18). The per-uid VPN-iface hiding
+	 * (vpn_active) is reader-independent and unchanged. */
+	bool prefix_on = READ_ONCE(prefix_rules_present) &&
+			 vpnhide_uid_prefix_filtered(uid);
 
 	data->should_filter = false;
 
@@ -848,8 +854,8 @@ static int inet6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 			data->saved_len = data->skb ? data->skb->len : 0;
 			data->should_filter = true;
 			data->uid_target = vpn_active;
-			vpnhide_dbg("inet6_fill_entry: iface=%s -> filter\n",
-				    name);
+			vpnhide_dbg("inet6_fill_entry: iface=%s uid=%u -> filter\n",
+				    name, uid);
 		}
 	}
 	rcu_read_unlock();
@@ -1123,12 +1129,21 @@ static int if6_seq_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	if (seq->count <= data->start_count)
 		return 0;
 
-	/* Snapshot prefix rules under the lock; the compactor is freestanding
-	 * and must not take kernel locks itself. */
-	spin_lock(&targets_lock);
-	np = nr_prefix_rules;
-	memcpy(snap, prefix_rules, (size_t)np * sizeof(*snap));
-	spin_unlock(&targets_lock);
+	/* Prefix rules filter only app/shell readers: system readers (e.g.
+	 * networkstack) must keep seeing real addresses or network provisioning
+	 * wedges (on-device finding 2026-07-18). For other readers pass no rules
+	 * (np = 0); the per-uid vpn_match path below is unchanged. */
+	if (vpnhide_uid_prefix_filtered(from_kuid(&init_user_ns,
+						  current_uid()))) {
+		/* Snapshot prefix rules under the lock; the compactor is
+		 * freestanding and must not take kernel locks itself. */
+		spin_lock(&targets_lock);
+		np = nr_prefix_rules;
+		memcpy(snap, prefix_rules, (size_t)np * sizeof(*snap));
+		spin_unlock(&targets_lock);
+	} else {
+		np = 0;
+	}
 
 	/* VPN-iface hiding here is per-uid, like the other hooks. */
 	vpn_match = hook_active(VPNHIDE_HOOK_IF6_SEQ_SHOW) ?

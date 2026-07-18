@@ -595,6 +595,19 @@ static inline int vpnhide_prefix_match(const unsigned char addr[16],
 	return 1;
 }
 
+/* Should IPv6 prefix rules filter THIS reader's view? Apps (>= AID_APP) and
+ * the adb shell (AID_SHELL, so on-device verification stays feasible) get the
+ * filtered view; system readers (root, system_server, networkstack, ...) must
+ * keep seeing real addresses — hiding them breaks interface provisioning
+ * (verified on-device 2026-07-18: networkstack learns addrs via netlink and
+ * IpClient wedges when a covered prefix is hidden from it). */
+#define VPNHIDE_AID_APP 10000u
+#define VPNHIDE_AID_SHELL 2000u
+static inline int vpnhide_uid_prefix_filtered(unsigned int uid)
+{
+	return uid >= VPNHIDE_AID_APP || uid == VPNHIDE_AID_SHELL;
+}
+
 /* Freestanding NUL-terminated string equality. */
 static inline int vpnhide_streq(const char *a, const char *b)
 {
