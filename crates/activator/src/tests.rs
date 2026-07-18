@@ -146,6 +146,63 @@ fn empty_legacy_native_hook_list_is_disabled_for_every_backend() {
 }
 
 #[test]
+fn kpm_family_hookmask_uses_the_kpm_owned_set() {
+    // Enabled(true) selects every KPM-owned hook (0x3ff — no if6_seq_show).
+    assert_eq!(
+        NativeSelection::Enabled(true).hookmask(NativeHookFamily::Kpm),
+        Some(0x3ff),
+    );
+    // A hook the .ko owns but KPM cannot install is dropped as unownable.
+    assert_eq!(
+        NativeSelection::Hooks(vec!["if6_seq_show".to_owned()]).hookmask(NativeHookFamily::Kpm),
+        None,
+    );
+    assert_eq!(
+        NativeSelection::Hooks(vec!["dev_ioctl".to_owned()]).hookmask(NativeHookFamily::Kpm),
+        Some(0x20),
+    );
+    // Detailed with no kernel override means "all kernel hooks" → the KPM-owned
+    // subset; a kernel override KPM cannot install leaves nothing.
+    let detail = |kernel: Option<Vec<&str>>| {
+        NativeSelection::Detailed(NativeSelectionDetail {
+            enabled: true,
+            kernel: kernel.map(|names| names.into_iter().map(str::to_owned).collect()),
+            zygisk: None,
+        })
+    };
+    assert_eq!(detail(None).hookmask(NativeHookFamily::Kpm), Some(0x3ff),);
+    assert_eq!(
+        detail(Some(vec!["if6_seq_show"])).hookmask(NativeHookFamily::Kpm),
+        None,
+    );
+}
+
+#[test]
+fn kpm_wire_projection_drops_hooks_kpm_cannot_install() {
+    let cfg = parse_canonical(
+        r#"{
+          "version": 1,
+          "apps": {
+            "com.example.full": { "native": true },
+            "com.example.if6only": { "native": ["if6_seq_show"] }
+          }
+        }"#,
+    )
+    .unwrap();
+    let resolver = parse_pm_packages(
+        "package:com.example.full uid:10234\n\
+         package:com.example.if6only uid:10345\n",
+    );
+
+    assert_eq!(
+        project_native_with_resolver_for_family(&cfg, &resolver, NativeHookFamily::Kpm),
+        "vpnhide 1 config\n\
+         debug 0\n\
+         target 0x27fa 0x3ff\n",
+    );
+}
+
+#[test]
 fn parses_shared_storage_fixture() {
     let cfg = parse_canonical(include_str!("../../../testdata/storage_config_v1.json")).unwrap();
 

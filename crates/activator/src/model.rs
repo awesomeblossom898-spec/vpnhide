@@ -136,6 +136,7 @@ fn default_enabled() -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NativeHookFamily {
     Kernel,
+    Kpm,
     Zygisk,
 }
 
@@ -143,6 +144,7 @@ impl NativeHookFamily {
     fn full_mask(self) -> u32 {
         match self {
             NativeHookFamily::Kernel => KERNEL_HOOK_MASK,
+            NativeHookFamily::Kpm => KPM_HOOK_MASK,
             NativeHookFamily::Zygisk => ZYGISK_HOOK_MASK,
         }
     }
@@ -161,6 +163,9 @@ impl NativeSelection {
                     NativeHookFamily::Kernel => {
                         names.iter().fold(0u32, |acc, name| acc | hook_bit(name)) & KERNEL_HOOK_MASK
                     }
+                    NativeHookFamily::Kpm => {
+                        names.iter().fold(0u32, |acc, name| acc | hook_bit(name)) & KPM_HOOK_MASK
+                    }
                     NativeHookFamily::Zygisk => ZYGISK_HOOK_MASK,
                 };
                 (mask != 0).then_some(mask)
@@ -170,7 +175,10 @@ impl NativeSelection {
                     return None;
                 }
                 let selected = match family {
-                    NativeHookFamily::Kernel => &detail.kernel,
+                    // KPM shares the kernel-family selection: the canonical
+                    // config stays kernel-family-level and the KPM projection
+                    // drops what KPM cannot install (e.g. if6_seq_show).
+                    NativeHookFamily::Kernel | NativeHookFamily::Kpm => &detail.kernel,
                     NativeHookFamily::Zygisk => &detail.zygisk,
                 };
                 let Some(names) = selected else {

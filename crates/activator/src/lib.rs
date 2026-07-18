@@ -21,7 +21,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::Deserialize;
 use vpnhide_protocol::Target;
-use vpnhide_protocol::hook_ids::{HOOK_NAMES, KERNEL_HOOK_MASK, ZYGISK_HOOK_MASK};
+use vpnhide_protocol::hook_ids::{HOOK_NAMES, KERNEL_HOOK_MASK, KPM_HOOK_MASK, ZYGISK_HOOK_MASK};
 use vpnhide_protocol::{
     Kind, MAX_PREFIX_RULES, MAX_TARGET_UIDS, PrefixRule, format_config_ex, parse_config, peek_kind,
 };
@@ -181,7 +181,7 @@ fn activate_kpm_with_pm_wait(wait: PmReadyWait, conflict_is_error: bool) -> Resu
     if skip_kpm_for_kmod_conflict(conflict_is_error)? {
         return Ok(KpmBootOutcome::DeferredConflict);
     }
-    let wire = project_native_with_pm_wait(&read_canonical()?, NativeHookFamily::Kernel, wait)?;
+    let wire = project_native_with_pm_wait(&read_canonical()?, NativeHookFamily::Kpm, wait)?;
     // Re-check after the (possibly long) PackageManager wait: the .ko may have
     // been loaded meanwhile, in which case we must not configure the KPM.
     if skip_kpm_for_kmod_conflict(conflict_is_error)? {
