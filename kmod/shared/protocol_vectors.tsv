@@ -100,3 +100,5 @@ cfg|vpnhide 1 config\nprefix rmnet_data1 24014900000000000000000000000000 0x81\n
 cfg|vpnhide 1 config\nprefix abcdefghijklmnop 24014900000000000000000000000000 0x20\n|debug=-1
 # missing plen token -> reject that line
 cfg|vpnhide 1 config\nprefix rmnet_data1 24014900000000000000000000000000\n|debug=-1
+# prefix line before target line -> order-independent parse, producers emit targets first
+cfg|vpnhide 1 config\nprefix wlan0 fe800000000000000000000000000000 0x40\ntarget 0x2710 0x1\n|debug=-1;0x2710:0x1;pfx:wlan0:fe800000000000000000000000000000:64
