@@ -83,10 +83,13 @@ internal object HookIds {
 
         // __recvfrom_chk() fortified netlink dump filtering
         ZYGISK_RECVFROM_CHK(24, "zygisk_recvfrom_chk", "__recvfrom_chk() fortified netlink dump filtering"),
+
+        // /proc/net/if_inet6 — hide per-iface IPv6 addrs (VPN + prefix rules)
+        IF6_SEQ_SHOW(25, "if6_seq_show", "/proc/net/if_inet6 — hide per-iface IPv6 addrs (VPN + prefix rules)"),
     }
 
     // Hooks owned by each backend: apply `mask and own`.
-    const val KERNEL_HOOK_MASK = 0x3ff
+    const val KERNEL_HOOK_MASK = 0x20003ff
     const val ZYGISK_HOOK_MASK = 0x1fc0000
     const val LSPOSED_HOOK_MASK = 0x3fc00
 

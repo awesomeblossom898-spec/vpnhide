@@ -56,12 +56,14 @@ pub enum Hook {
     ZygiskRecvfrom = 23,
     /// __recvfrom_chk() fortified netlink dump filtering
     ZygiskRecvfromChk = 24,
+    /// /proc/net/if_inet6 — hide per-iface IPv6 addrs (VPN + prefix rules)
+    If6SeqShow = 25,
 }
 
-pub const HOOK_COUNT: u32 = 25;
+pub const HOOK_COUNT: u32 = 26;
 
 /// Hooks owned by each backend: apply `mask & own`.
-pub const KERNEL_HOOK_MASK: u32 = 0x3ff;
+pub const KERNEL_HOOK_MASK: u32 = 0x20003ff;
 pub const ZYGISK_HOOK_MASK: u32 = 0x1fc0000;
 pub const LSPOSED_HOOK_MASK: u32 = 0x3fc00;
 
@@ -95,7 +97,7 @@ pub enum Backend {
     Lsposed = 3,
 }
 
-pub const HOOK_NAMES: [&str; 25] = [
+pub const HOOK_NAMES: [&str; 26] = [
     "fib_route_seq_show",
     "ipv6_route_seq_show",
     "rtnl_fill_ifinfo",
@@ -121,4 +123,5 @@ pub const HOOK_NAMES: [&str; 25] = [
     "zygisk_recv",
     "zygisk_recvfrom",
     "zygisk_recvfrom_chk",
+    "if6_seq_show",
 ];

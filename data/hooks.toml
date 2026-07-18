@@ -172,6 +172,14 @@ name = "zygisk_recvfrom_chk"
 backend = "zygisk"
 note = "__recvfrom_chk() fortified netlink dump filtering"
 
+# --- late-added kernel hooks --------------------------------------------
+
+[[hook]]
+id = 25
+name = "if6_seq_show"
+backend = "kernel"
+note = "/proc/net/if_inet6 — hide per-iface IPv6 addrs (VPN + prefix rules)"
+
 # --- backend ids (protocol §4.3 `status backend <id>`) ----------------------
 # Which backend answered a `status` read. Distinct from the hook `backend`
 # field above (.ko and KPM both own "kernel" hooks but are separate backends).
