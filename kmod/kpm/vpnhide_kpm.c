@@ -668,6 +668,8 @@ static void addr_fill_before(hook_fargs4_t *fargs, void *dev, uint32_t hook_id)
 {
 	void *skb = (void *)fargs->arg0;
 
+	fargs->local.data3 =
+		1; /* uid_target: v4 is per-uid only (no prefix path) */
 	fargs->local.data0 = 0;
 	if (!hook_active(hook_id) || !skb || !dev)
 		return;
@@ -689,7 +691,10 @@ static void addr_fill_after_hook(hook_fargs4_t *fargs, uint32_t hook_id)
 		_skb_trim((void *)fargs->local.data1,
 			  (unsigned int)fargs->local.data2);
 	fargs->ret = 0;
-	record_hook_hit(hook_id);
+	if (fargs->local.data3)
+		record_hook_hit(hook_id);
+	else
+		record_global_hook_hit(hook_id);
 }
 
 static void inet_fill_after(hook_fargs4_t *fargs, void *udata)
@@ -713,7 +718,39 @@ static void inet6_fill_before(hook_fargs4_t *fargs, void *udata)
 {
 	void *dev = deref2((void *)fargs->arg1, off->inet6_ifaddr_idev,
 			   off->inet6_dev_dev);
-	addr_fill_before(fargs, dev, VPNHIDE_HOOK_INET6_FILL_IFADDR);
+	void *skb = (void *)fargs->arg0;
+	const char *name;
+	int active, filter;
+
+	fargs->local.data0 = 0;
+	active = hook_active(VPNHIDE_HOOK_INET6_FILL_IFADDR);
+	/* uid_target: "enabled" stats semantics (parity with the .ko's
+	 * inet6_fill_data.uid_target = vpn_active) — per-uid row iff this
+	 * reader is a target with the hook enabled, sentinel global row
+	 * otherwise. */
+	fargs->local.data3 = (uint64_t)active;
+	if (!skb || !dev)
+		return;
+	name = netdev_name(dev);
+
+	filter = 0;
+	if (active && iface_is_vpn(name)) {
+		filter = 1;
+	} else if (nr_prefix_rules > 0 &&
+		   vpnhide_uid_prefix_filtered((unsigned int)current_uid())) {
+		/* struct inet6_ifaddr begins with struct in6_addr addr (@0) on
+		 * every supported kver — the layout the .ko compiles against. */
+		if (kpm_prefix_rule_hit(name,
+					(const unsigned char *)fargs->arg1))
+			filter = 1;
+	}
+	if (!filter)
+		return;
+
+	fargs->local.data0 = 1;
+	fargs->local.data1 = (uint64_t)skb;
+	fargs->local.data2 =
+		(uint64_t) * (unsigned int *)((char *)skb + off->skb_len);
 }
 
 /* ================================================================== */
