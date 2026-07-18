@@ -70,7 +70,9 @@
  * activator truncates the projected config to this many targets, so keep both in
  * sync. */
 #define MAX_TARGET_UIDS 64
-#define MAX_STATS_ENTRIES (MAX_TARGET_UIDS * VPNHIDE_HOOK_COUNT)
+/* +1 hook-row of headroom for the uid-independent global prefix-hit stats,
+ * reported under the VPNHIDE_GLOBAL_STATS_UID sentinel row. */
+#define MAX_STATS_ENTRIES ((MAX_TARGET_UIDS + 1) * VPNHIDE_HOOK_COUNT)
 #define CTL_READ_BUF_SIZE 32768
 
 /*
@@ -198,6 +200,15 @@ static struct stats_row stats_rows[MAX_TARGET_UIDS];
 static int nr_stats_rows;
 static DEFINE_SPINLOCK(stats_lock);
 
+/* Sentinel UID for the uid-independent global prefix-hit stats row. Real
+ * Android app/system UIDs never reach (uid_t)-1 (the kernel invalid uid). */
+#define VPNHIDE_GLOBAL_STATS_UID ((uid_t)-1)
+
+/* Global (uid-independent) hook hits — prefix-rule matches fired by non-target
+ * UIDs. Kept out of stats_rows[] so they never consume the per-UID table or
+ * mask a real target's stats. Guarded by stats_lock. */
+static u64 global_hook_counts[VPNHIDE_HOOK_COUNT];
+
 static void record_hook_hit(u32 hook_id)
 {
 	uid_t uid;
@@ -225,6 +236,19 @@ static void record_hook_hit(u32 hook_id)
 	spin_unlock_irqrestore(&stats_lock, flags);
 }
 
+/* Global (uid-independent) counterpart to record_hook_hit: a prefix-rule hit by
+ * a non-target UID. Never touches the per-UID stats_rows[] table. */
+static void record_global_hook_hit(u32 hook_id)
+{
+	unsigned long flags;
+
+	if (hook_id >= VPNHIDE_HOOK_COUNT)
+		return;
+	spin_lock_irqsave(&stats_lock, flags);
+	global_hook_counts[hook_id]++;
+	spin_unlock_irqrestore(&stats_lock, flags);
+}
+
 static int snapshot_stats(struct vpnhide_stat_entry *out, int max)
 {
 	unsigned long flags;
@@ -240,6 +264,14 @@ static int snapshot_stats(struct vpnhide_stat_entry *out, int max)
 			out[n].count = stats_rows[i].counts[hook];
 			n++;
 		}
+	}
+	for (hook = 0; hook < VPNHIDE_HOOK_COUNT && n < max; hook++) {
+		if (global_hook_counts[hook] == 0)
+			continue;
+		out[n].uid = VPNHIDE_GLOBAL_STATS_UID;
+		out[n].hook_id = hook;
+		out[n].count = global_hook_counts[hook];
+		n++;
 	}
 	spin_unlock_irqrestore(&stats_lock, flags);
 	return n;
@@ -788,6 +820,7 @@ struct inet6_fill_data {
 	struct sk_buff *skb;
 	unsigned int saved_len;
 	bool should_filter;
+	bool uid_target; /* filtering UID is a target (per-uid) vs global-only */
 };
 
 static int inet6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
@@ -814,6 +847,7 @@ static int inet6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 			data->skb = (struct sk_buff *)regs->regs[0];
 			data->saved_len = data->skb ? data->skb->len : 0;
 			data->should_filter = true;
+			data->uid_target = vpn_active;
 			vpnhide_dbg("inet6_fill_entry: iface=%s -> filter\n",
 				    name);
 		}
@@ -834,7 +868,10 @@ static int inet6_fill_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	/* Undo whatever the fill function wrote to the skb */
 	skb_trim(data->skb, data->saved_len);
 	regs_set_return_value(regs, 0);
-	record_hook_hit(VPNHIDE_HOOK_INET6_FILL_IFADDR);
+	if (data->uid_target)
+		record_hook_hit(VPNHIDE_HOOK_INET6_FILL_IFADDR);
+	else
+		record_global_hook_hit(VPNHIDE_HOOK_INET6_FILL_IFADDR);
 	return 0;
 }
 
@@ -1102,7 +1139,10 @@ static int if6_seq_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 					      seq->count, vpn_match, snap, np);
 	if (newc != seq->count) {
 		seq->count = newc;
-		record_hook_hit(VPNHIDE_HOOK_IF6_SEQ_SHOW);
+		if (vpn_match)
+			record_hook_hit(VPNHIDE_HOOK_IF6_SEQ_SHOW);
+		else
+			record_global_hook_hit(VPNHIDE_HOOK_IF6_SEQ_SHOW);
 	}
 	return 0;
 }
