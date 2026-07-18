@@ -93,7 +93,14 @@ class ProtocolTest {
             buildString {
                 append("debug=").append(dbg)
                 for (t in cfg.targets) append(";0x").append(t.uid.toString(16)).append(":0x").append(t.hookmask.toString(16))
-                for (p in cfg.prefixes) append(";pfx:").append(p.ifname).append(':').append(p.addrHex).append(':').append(p.prefixLen)
+                for (p in cfg.prefixes) {
+                    append(";pfx:")
+                        .append(p.ifname)
+                        .append(':')
+                        .append(p.addrHex)
+                        .append(':')
+                        .append(p.prefixLen)
+                }
             }
         assertEquals("cfg <$input>", expect, got)
     }

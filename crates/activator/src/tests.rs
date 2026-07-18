@@ -642,7 +642,9 @@ fn prefix_projection_is_bounded_to_backend_capacity() {
     let cfg = parse_canonical(&format!("{{ \"ipv6PrefixRules\": [ {rules} ] }}")).unwrap();
     let wire = project_native_with_resolver(&cfg, &PackageUidMap::default());
     assert_eq!(
-        wire.lines().filter(|line| line.starts_with("prefix ")).count(),
+        wire.lines()
+            .filter(|line| line.starts_with("prefix "))
+            .count(),
         8
     );
 }
