@@ -158,12 +158,17 @@ items.
 | Vector | How it manifests | kmod | KPM | Zygisk | lsposed | SELinux |
 |---|---|:--:|:--:|:--:|:--:|:--:|
 | `/proc/net/route` (IPv4) | text, iface in col 1 | ✅ `fib_route_seq_show` | ✅ `fib_route_seq_show` | ✅ `filter_route_buf` | — | 🔒 often denied |
-| `/proc/net/ipv6_route` | text, iface last field | ✅ `ipv6_route_seq_show` | ✅ `ipv6_route_seq_show` | ✅ | — | 🔒 |
-| netlink `RTM_GETROUTE` **dump** | `RTA_OIF` index per route | ✅ `fib_dump_info` / `rt6_fill_node` | ✅ `fib_dump_info` / `rt6_fill_node` | ✅ `RTM_NEWROUTE` filter (issue #86) | — | |
+| `/proc/net/ipv6_route` | text, iface last field | ✅ `ipv6_route_seq_show` (+ prefix-rule destinations) | ✅ `ipv6_route_seq_show` | ✅ | — | 🔒 |
+| netlink `RTM_GETROUTE` **dump** | `RTA_OIF` index per route | ✅ `fib_dump_info` / `rt6_fill_node` (+ prefix-rule destinations, v6) | ✅ `fib_dump_info` / `rt6_fill_node` | ✅ `RTM_NEWROUTE` filter (issue #86) | — | |
 | netlink `RTM_GETROUTE` **single** (`ip route get`) | one `rt_fill_info` reply | ⚠️ intentionally unhooked (see ROADMAP) | ⚠️ intentionally unhooked | ⚠️ not filtered | — | |
 | netlink `RTM_GETRULE` (policy rules) | per-UID lookup tables | ✅ `fib_nl_fill_rule` | ✅ `fib_nl_fill_rule` | — | — | |
 | host-route to the VPN **server** | `/32`·`/128` to a public IP via a *physical* iface | ✅ `is_public_host_route_via_physical` | ✅ `kpm_is_public_host_route{4,6}` | — | — | |
 | `LinkProperties.getRoutes()` (Java) | framework route list | — | — | — | ✅ filter `mRoutes` | |
+
+The `.ko` additionally hides v6 route **destinations** covered by a global
+prefix rule — on `/proc/net/ipv6_route` and in RTM_GETROUTE v6 dumps — under
+the same reader-uid gate as the address paths (3C); KPM and Zygisk do not
+implement prefix rules yet.
 
 The **`if<N>` leak (issue #86)** lived here: a hidden tun still has an index, and
 a route dump exposes that index even when the *name* is hidden, so the detector

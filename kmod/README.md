@@ -14,9 +14,9 @@ Zero footprint in the target app's process -- no modified function prologues, no
 | `inet6_fill_ifaddr` | Trims VPN entries from RTM_GETADDR IPv6 responses via `skb_trim` | IPv6 address enumeration over netlink |
 | `inet_fill_ifaddr` | Trims VPN entries from RTM_GETADDR IPv4 responses via `skb_trim` | IPv4 address enumeration over netlink |
 | `fib_route_seq_show` | Forward-scans for VPN lines and compacts them out with `memmove` | `/proc/net/route` reads |
-| `ipv6_route_seq_show` | Forward-scans for VPN lines and compacts them out with `memmove` | `/proc/net/ipv6_route` reads |
+| `ipv6_route_seq_show` | Forward-scans for VPN-interface and global prefix-rule route-destination lines and compacts them out | `/proc/net/ipv6_route` reads |
 | `fib_dump_info` | Trims IPv4 VPN route entries and public physical-interface host-route hints from netlink route dumps via `skb_trim` | RTM_GETROUTE route table dumps |
-| `rt6_fill_node` | Trims IPv6 VPN route entries from netlink route dump replies via `skb_trim` | IPv6 RTM_GETROUTE dumps |
+| `rt6_fill_node` | Trims IPv6 VPN route entries and global prefix-rule route destinations from netlink route dump replies via `skb_trim` | IPv6 RTM_GETROUTE dumps |
 | `fib_nl_fill_rule` | Trims target-UID policy rules and VPN interface rules from netlink rule dumps via `skb_trim` | RTM_GETRULE policy routing dumps |
 | `if6_seq_show` | Forward-scans for VPN-interface and global prefix-rule IPv6 address lines and compacts them out | `/proc/net/if_inet6` reads |
 

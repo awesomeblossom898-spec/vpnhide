@@ -250,7 +250,11 @@ prefix <ifname> <addr32hex> <plen_hex>
 - `prefix <ifname> <addr32hex> <plen_hex>` — one per IPv6 prefix rule;
   **global** across targets (NOT per-app — there is no `uid` field). A v6
   address on `ifname` whose first `plen` bits equal the rule's prefix is
-  hidden from the reader. `ifname` is 1..15 chars. `addr32hex` is exactly 32
+  hidden from the reader. The same rule also hides matching v6 route
+  **destinations** on `ifname`: a `/proc/net/ipv6_route` line or an
+  RTM_GETROUTE v6 entry whose destination falls inside the prefix is
+  filtered exactly like a matching address (the route's own plen field is
+  never consulted). `ifname` is 1..15 chars. `addr32hex` is exactly 32
   hex chars with **no `0x` prefix** — a documented deviation from §4.4 (the
   same contract as `/proc/net/if_inet6`), liberal-in case on read,
   lowercase-normalized on write. `plen_hex` is a normal §4.4 value,
@@ -261,7 +265,7 @@ prefix <ifname> <addr32hex> <plen_hex>
   app (`uid >= 10000`, AID_APP — covers isolated uids) or the adb shell
   (`uid == 2000`, AID_SHELL — keeps on-device verification feasible); system
   readers (root 0, `system_server` 1000, `networkstack` 1073, …) ALWAYS see
-  the real addresses — hiding the device's own v6 addresses from
+  the real addresses and routes — hiding the device's own v6 addresses from
   `networkstack` wedges IpClient provisioning and mobile data never
   validates (verified on-device 2026-07-18). The gate applies ONLY to prefix
   filtering — per-target VPN-interface hiding is unchanged. Backends that
