@@ -7,7 +7,7 @@ import dev.okhsunrog.vpnhide.generated.HookIds
 // glance. "Native" covers both the kernel backends and Zygisk's libc hooks.
 internal enum class MethodSurface { Java, Native, Package }
 
-// User-facing detection method: a small taxonomy over the 18 raw hooks so the
+// User-facing detection method: a small taxonomy over the raw hooks so the
 // Statistics screen reads as "what the app tried" instead of kernel symbol
 // names. Several hooks fold into one method (e.g. the four route hooks).
 internal enum class DetectionMethod(
@@ -40,6 +40,7 @@ internal enum class DetectionMethod(
                 HookIds.Hook.RTNL_FILL_IFINFO,
                 HookIds.Hook.INET_FILL_IFADDR,
                 HookIds.Hook.INET6_FILL_IFADDR,
+                HookIds.Hook.IF6_SEQ_SHOW,
                 -> Interfaces
 
                 HookIds.Hook.DEV_IOCTL,
