@@ -32,6 +32,17 @@ Per design spec §17 item 3: "Rust + Kotlin parity + activator JSON schema (diff
 - Kotlin `canonicalConfigJson` emits the `ipv6PrefixRules` key **only when non-empty** (empty-config output stays byte-identical for existing round-trip tests).
 - Global prefix hits by non-target UIDs surface in the module `stats` read under sentinel UID `0xFFFFFFFF` (`VPNHIDE_GLOBAL_STATS_UID`, Phase 2 Fix-A). The app currently renders it as "unknown uid" — acceptable; document in protocol.md (Task 4); UI special-casing is Phase 7.
 
+## 1a. Amendment 2026-07-18 (on-device finding — READ BEFORE EXECUTING)
+
+On-device extended testing (Nord 3, post-reboot .ko, controlled A/A experiment — full evidence in `.superpowers/sdd/progress.md` "CRITICAL FINDING") proved: **the ungated global prefix filter breaks mobile-data bring-up on covered interfaces.** networkstack (uid 1073) learns interface v6 addresses via the same netlink path the filter rewrites; hiding the device's own provisioning prefix from networkstack wedges IpClient and the data call never validates (two stalled attempts >4 min; cleared rules → validated <20 s). Consequences for this plan:
+
+1. **P2 T8 (uid gate) is a HARD DEPENDENCY of any on-device use** of a rule covering the device's own provisioning prefix, and of boot-time application via the canonical JSON (Phase 3's whole point). T8 gates prefix filtering to reader uid `>= 10000` (apps, incl. isolated) or `== 2000` (shell, keeps adb verification feasible); system readers (networkstack, system_server, netd) see the truth. The ConnectivityManager/LinkProperties cache remains visible to apps BY ARCHITECTURE — framework-API filtering is the LSPosed layer's job (same split as the existing VPN-iface hiding). Until T8 lands + is on-device verified (blanket rules + data toggle must validate), do NOT install a boot-applied config that hides an internet prefix.
+2. The earlier claim "boot-time application closes the cached-LinkProperties gap by construction" is **withdrawn** — without the gate it would wedge data at every boot.
+3. **Folded into Task 2's scope:** `ConfigChannelsTest.kt` (first test) hardcodes the pre-8e6ace8 full kernel mask `0x3ff`; generated `HookIds.KERNEL_HOOK_MASK` is `0x20003ff` — three literal updates, kept hardcoded as a deliberate tripwire. The arbitrary `0x3ff` fixture masks in `ProtocolTest.configRoundTrips` are literal round-trip values and stay AS-IS.
+4. **Folded into Task 4's scope:** fix stale `0x3ff` full-kernel-mask claims in `docs/storage.md` (~267/278/286), `docs/protocol.md` (~329/422/515), `kmod/README.md` (~68-69); document the reader-uid gate in `docs/protocol.md` §4.3 prefix-record semantics ("filtered for app/shell readers; system readers see real addresses so provisioning is unaffected"); document the iface-migration operational note (cellular internet may move across `rmnet_dataN` on re-bring-up — configs should cover all candidate ifaces, e.g. rmnet_data0-3; IMS stays safe because its /32 differs).
+5. Observed known leak, already this plan's Phase 4 candidate: `ip -6 route`/FIB dumps still expose the covered /64 (route-path prefix filtering not implemented).
+6. `kmod/test/init.sh` (~line 40) wrote the old mask `0x3ff` — fixed in T8 (kernel side), not here.
+
 ## 2. Verification model (fork)
 
 No local toolchain on the orchestrator box. Gates, in order:
