@@ -249,6 +249,52 @@ static void test_compact_if_inet6(void)
 		"fe800000000000005042d7fffe000001 1e 40 20 80 rmnet_data1\n");
 }
 
+static void test_compact_if_inet6_vpn_and_edges(void)
+{
+	/* Case A: vpn_match removes the tun0 line, the prefix rule removes the
+	 * rmnet_data1 global v6, and the LAST line has NO trailing newline. */
+	char buf[512] =
+		"fe800000000000005042d7fffe000001 05 40 20 80 tun0\n"
+		"24014900a3f1e04d54fdd7fffeb173bf 1e 40 00 00 rmnet_data1\n"
+		"24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3";
+	struct vpnhide_prefix_rule rules[1];
+	unsigned long n;
+
+	memset(&rules[0], 0, sizeof(rules[0]));
+	strcpy(rules[0].ifname, "rmnet_data1");
+	rules[0].addr[0] = 0x24;
+	rules[0].addr[1] = 0x01;
+	rules[0].addr[2] = 0x49;
+	rules[0].addr[3] = 0x00;
+	rules[0].prefix_len = 32;
+
+	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf), match_vpn, rules,
+					   1);
+	buf[n] = '\0';
+	expect_str(
+		"if_inet6: vpn tun0 + prefix removed, no-trailing-newline kept",
+		buf, "24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3");
+
+	/* Case B: bytes before `start` are never touched (even a VPN line); the
+	 * tun0 line after start is removed by vpn_match (rules unused here). */
+	{
+		char buf2[256] =
+			"24014900a3f1e04d54fdd7fffeb173bf 1e 40 00 00 rmnet_data1\n"
+			"fe800000000000005042d7fffe000001 05 40 20 80 tun0\n";
+		unsigned long start = strlen(
+			"24014900a3f1e04d54fdd7fffeb173bf 1e 40 00 00 rmnet_data1\n");
+		unsigned long m = vpnhide_compact_if_inet6_lines(
+			buf2, start, strlen(buf2), match_vpn,
+			(const struct vpnhide_prefix_rule *)0, 0);
+
+		buf2[m] = '\0';
+		expect_str(
+			"if_inet6: start offset preserved (pre-start line kept)",
+			buf2,
+			"24014900a3f1e04d54fdd7fffeb173bf 1e 40 00 00 rmnet_data1\n");
+	}
+}
+
 int main(void)
 {
 	test_route_first_field();
@@ -260,6 +306,7 @@ int main(void)
 	test_parse_uids();
 	test_prefix_match();
 	test_compact_if_inet6();
+	test_compact_if_inet6_vpn_and_edges();
 
 	if (failures) {
 		fprintf(stderr, "%d test(s) failed\n", failures);
