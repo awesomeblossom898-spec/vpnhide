@@ -9,8 +9,9 @@
  * NOT insmod — so it also works where module signing blocks a `.ko`.
  *
  * STATUS: builds (`make kpm`) and runs end-to-end under QEMU via the KPM
- * harness (../test/run-kpm.sh). All 10 hooks are A/B-validated with no panic
- * (full native-vector parity with the .ko) on FIVE kernels, each a separate
+ * harness (../test/run-kpm.sh). All 10 KPM-owned hooks are A/B-validated with
+ * no panic (native-vector parity with the .ko on the vectors KPM owns — the
+ * .ko installs 11, adding if6_seq_show) on FIVE kernels, each a separate
  * from-source QEMU Image: 4.14, 4.19, 5.4, 5.10 and 6.1 (9/9 vectors apiece).
  * The procfs control plane is still TODO (A/B uses load-args). Every per-kver
  * offset must pass the harness before that version ships — a wrong offset is a
@@ -130,7 +131,7 @@ static uint32_t compute_active_hook_mask(int count)
 	int i;
 
 	for (i = 0; i < count; i++)
-		mask |= targets[i].hookmask & VPNHIDE_KERNEL_HOOK_MASK;
+		mask |= targets[i].hookmask & VPNHIDE_KPM_HOOK_MASK;
 	return mask;
 }
 
@@ -861,7 +862,8 @@ static void fib_rule_after(hook_fargs8_t *fargs, void *udata)
 }
 
 /*
- * HOOK COVERAGE — full parity with vpnhide_kmod.c (the .ko). All 10 hooks
+ * HOOK COVERAGE — the KPM-owned kernel set (VPNHIDE_KPM_HOOK_MASK): 10 of the
+ * .ko's 11 hooks (no if6_seq_show — /proc/net/if_inet6 stays .ko-only). All 10
  * ported and QEMU-validated A/B on android12-5.10 (no panic). Mirror the
  * .ko's logic; reuse shared/vpnhide_logic.h. Per-version struct offsets live
  * in kver_offsets.h (5.10 only so far) — a wrong offset is a contained QEMU
@@ -1019,10 +1021,11 @@ static int resolve_symbols(void)
 /*
  * Load-time / test target path: a bare newline/space-separated decimal UID list
  * (KernelPatch load extra-args, e.g. sc_kpm_load(key, path, "10010 10020"), as
- * the QEMU A/B harness uses). Each listed uid gets the FULL kernel hook mask —
- * i.e. "enable everything for these uids". Per-hook control is the job of the
- * runtime ctl0 `config` channel (vpnhide_parse_config); this path predates it
- * and stays for headless bring-up where no superkey/ctl0 round-trip is wired.
+ * the QEMU A/B harness uses). Each listed uid gets the FULL KPM-owned hook
+ * mask — i.e. "enable everything for these uids". Per-hook control is the job
+ * of the runtime ctl0 `config` channel (vpnhide_parse_config); this path
+ * predates it and stays for headless bring-up where no superkey/ctl0
+ * round-trip is wired.
  */
 static void apply_targets(const char *s)
 {
@@ -1039,7 +1042,7 @@ static void apply_targets(const char *s)
 		return; /* init path has no concurrent writer; defensive only */
 	for (i = 0; i < cnt; i++) {
 		targets[i].uid = uids[i];
-		targets[i].hookmask = VPNHIDE_KERNEL_HOOK_MASK;
+		targets[i].hookmask = VPNHIDE_KPM_HOOK_MASK;
 	}
 	nr_targets = cnt;
 	active_hook_mask = compute_active_hook_mask(cnt);
@@ -1088,8 +1091,8 @@ static long vpnhide_kpm_init(const char *args, const char *event,
 	}
 
 	/* Targets can come at load time: sc_kpm_load(key, path, "10010 10020")
-	 * (decimal list, all hooks). The runtime ctl0 `config` channel feeds the
-	 * same set with per-hook masks. */
+	 * (decimal list, all KPM-owned hooks). The runtime ctl0 `config` channel
+	 * feeds the same set with per-hook masks. */
 	apply_targets(args);
 
 	/*
@@ -1138,10 +1141,10 @@ static long vpnhide_kpm_init(const char *args, const char *event,
 			     (void *)fib_rule_after,
 			     VPNHIDE_HOOK_FIB_NL_FILL_RULE);
 
-	/* Healthy iff every kernel-owned hook installed; otherwise honestly
+	/* Healthy iff every KPM-owned hook installed; otherwise honestly
 	 * report partial — the `hooks` mask carries which ones (§5.1). A kver
 	 * with an incomplete offset table lands here by design. */
-	last_error = (installed_hooks == VPNHIDE_KERNEL_HOOK_MASK) ?
+	last_error = (installed_hooks == VPNHIDE_KPM_HOOK_MASK) ?
 			     VPNHIDE_ERR_OK :
 			     VPNHIDE_ERR_PARTIAL_HOOKS;
 

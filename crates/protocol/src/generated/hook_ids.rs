@@ -63,7 +63,9 @@ pub enum Hook {
 pub const HOOK_COUNT: u32 = 26;
 
 /// Hooks owned by each backend: apply `mask & own`.
+/// KPM is the subset of the kernel hooks the KPM backend installs.
 pub const KERNEL_HOOK_MASK: u32 = 0x20003ff;
+pub const KPM_HOOK_MASK: u32 = 0x3ff;
 pub const ZYGISK_HOOK_MASK: u32 = 0x1fc0000;
 pub const LSPOSED_HOOK_MASK: u32 = 0x3fc00;
 

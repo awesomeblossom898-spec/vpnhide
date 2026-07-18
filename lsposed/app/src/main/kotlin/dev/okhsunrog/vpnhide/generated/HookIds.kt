@@ -89,7 +89,9 @@ internal object HookIds {
     }
 
     // Hooks owned by each backend: apply `mask and own`.
+    // KPM is the subset of the kernel hooks the KPM backend installs.
     const val KERNEL_HOOK_MASK = 0x20003ff
+    const val KPM_HOOK_MASK = 0x3ff
     const val ZYGISK_HOOK_MASK = 0x1fc0000
     const val LSPOSED_HOOK_MASK = 0x3fc00
 

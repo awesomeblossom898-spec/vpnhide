@@ -160,8 +160,9 @@ bootloop**, where the `.ko`'s kretprobe would just fail to register. So:
       PoC hooks PASS on android12-5.10**: root sees `vpn0` when not targeted,
       not when targeted; no panic. Validates the inline hooks + the 5.x
       offsets (skb.len=104) + `fargs->local` state passing on a real kernel.
-- [x] **All 10 hooks ported + QEMU-validated** on android12-5.10 (no panic),
-      full native-vector parity with the `.ko`: `fib_route_seq_show`,
+- [x] **All 10 KPM-owned hooks ported + QEMU-validated** on android12-5.10
+      (no panic), native-vector parity with the `.ko` on the vectors KPM owns
+      (the `.ko` installs 11, adding `if6_seq_show`): `fib_route_seq_show`,
       `ipv6_route_seq_show`, `rtnl_fill_ifinfo`, `inet_fill_ifaddr`,
       `inet6_fill_ifaddr`, `dev_ioctl`, `sock_ioctl`, `fib_dump_info` (#86),
       `rt6_fill_node`, `fib_nl_fill_rule`. The deep-struct ones use 5.10

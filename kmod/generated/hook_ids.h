@@ -31,8 +31,10 @@
 #define VPNHIDE_HOOK_IF6_SEQ_SHOW                  25
 #define VPNHIDE_HOOK_COUNT                         26
 
-/* Hooks owned by each backend: apply `mask & own`, ignore foreign bits. */
+/* Hooks owned by each backend: apply `mask & own`, ignore foreign bits.
+   KPM is the subset of the kernel hooks the KPM backend installs. */
 #define VPNHIDE_KERNEL_HOOK_MASK 0x20003ffu
+#define VPNHIDE_KPM_HOOK_MASK 0x3ffu
 #define VPNHIDE_ZYGISK_HOOK_MASK 0x1fc0000u
 #define VPNHIDE_LSPOSED_HOOK_MASK 0x3fc00u
 

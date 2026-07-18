@@ -4,6 +4,9 @@
 #   - bit N of a config `hookmask` == hook id N.
 #   - a `stats` line emits `<hook_id>:<count>` pairs over the same ids.
 #   - each backend acts only on `mask & <backend>_own` and ignores foreign bits.
+#   - `kpm` (optional, default true, only meaningful for `backend = "kernel"`):
+#     whether the KPM backend installs this hook. The .ko installs every kernel
+#     hook; KPM installs only the `kpm = true` subset (the KPM-owned mask).
 #
 # Read at codegen time by scripts/codegen-hooks.py, which renders the matching
 # id enums + per-backend masks + status error codes for every language that
@@ -178,6 +181,7 @@ note = "__recvfrom_chk() fortified netlink dump filtering"
 id = 25
 name = "if6_seq_show"
 backend = "kernel"
+kpm = false
 note = "/proc/net/if_inet6 — hide per-iface IPv6 addrs (VPN + prefix rules)"
 
 # --- backend ids (protocol §4.3 `status backend <id>`) ----------------------

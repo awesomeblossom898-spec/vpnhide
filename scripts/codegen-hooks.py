@@ -66,6 +66,7 @@ class Hook:
         self.id: int = raw["id"]
         self.name: str = raw["name"]
         self.backend: str = raw["backend"]
+        self.kpm: bool = raw.get("kpm", True)
         self.note: str = raw.get("note", "")
 
 
@@ -86,7 +87,8 @@ class Backend:
 def load() -> tuple[list[Hook], list[Err], list[Backend]]:
     with TOML_PATH.open("rb") as fh:
         data = tomllib.load(fh)
-    hooks = [Hook(h) for h in data.get("hook", [])]
+    raw_hooks: list[dict[str, Any]] = data.get("hook", [])
+    hooks = [Hook(h) for h in raw_hooks]
     errs = [Err(e) for e in data.get("error", [])]
     backends = [Backend(b) for b in data.get("backend", [])]
 
@@ -99,18 +101,36 @@ def load() -> tuple[list[Hook], list[Err], list[Backend]]:
         names = [it.name for it in items]
         if len(set(names)) != len(names):
             sys.exit(f"error: duplicate {label} name in {names}")
-    for h in hooks:
+    for raw, h in zip(raw_hooks, hooks, strict=True):
         if h.backend not in KNOWN_BACKENDS:
             sys.exit(f"error: hook {h.name!r} has unknown backend {h.backend!r}")
+        if "kpm" in raw and h.backend != "kernel":
+            sys.exit(
+                f"error: hook {h.name!r} sets 'kpm' but backend is {h.backend!r}"
+                " (only meaningful for 'kernel')"
+            )
     return hooks, errs, backends
 
 
-def backend_mask(hooks: list[Hook], backend: str) -> int:
+def backend_mask(hooks: list[Hook], backend: str, *, kpm_only: bool = False) -> int:
     m = 0
     for h in hooks:
-        if h.backend == backend:
-            m |= 1 << h.id
+        if h.backend != backend:
+            continue
+        if kpm_only and not h.kpm:
+            continue
+        m |= 1 << h.id
     return m
+
+
+# Masks emitted into every generated file: KERNEL is the whole kernel set (the
+# .ko's own mask), KPM is the subset the KPM backend installs (no if6_seq_show).
+EMIT_MASKS = (
+    ("KERNEL", "kernel", False),
+    ("KPM", "kernel", True),
+    ("ZYGISK", "zygisk", False),
+    ("LSPOSED", "lsposed", False),
+)
 
 
 # name-casing helpers ------------------------------------------------------
@@ -145,9 +165,11 @@ def emit_kmod(hooks: list[Hook], errs: list[Err], backends: list[Backend]) -> st
         L.append(f"#define {macro:<{width}} {h.id}")
     L.append(f"#define {'VPNHIDE_HOOK_COUNT':<{width}} {len(hooks)}")
     L.append("")
-    L.append("/* Hooks owned by each backend: apply `mask & own`, ignore foreign bits. */")
-    for b in KNOWN_BACKENDS:
-        L.append(f"#define VPNHIDE_{upper(b)}_HOOK_MASK 0x{backend_mask(hooks, b):x}u")
+    L.append("/* Hooks owned by each backend: apply `mask & own`, ignore foreign bits.")
+    L.append("   KPM is the subset of the kernel hooks the KPM backend installs. */")
+    for label, backend, kpm_only in EMIT_MASKS:
+        mask = backend_mask(hooks, backend, kpm_only=kpm_only)
+        L.append(f"#define VPNHIDE_{label}_HOOK_MASK 0x{mask:x}u")
     L.append("")
     L.append("/* status error codes (protocol §5.1). */")
     ewidth = max(len(f"VPNHIDE_ERR_{upper(e.name)}") for e in errs)
@@ -190,8 +212,10 @@ def emit_rust(hooks: list[Hook], errs: list[Err], backends: list[Backend]) -> st
     L.append(f"pub const HOOK_COUNT: u32 = {len(hooks)};")
     L.append("")
     L.append("/// Hooks owned by each backend: apply `mask & own`.")
-    for b in KNOWN_BACKENDS:
-        L.append(f"pub const {upper(b)}_HOOK_MASK: u32 = 0x{backend_mask(hooks, b):x};")
+    L.append("/// KPM is the subset of the kernel hooks the KPM backend installs.")
+    for label, backend, kpm_only in EMIT_MASKS:
+        mask = backend_mask(hooks, backend, kpm_only=kpm_only)
+        L.append(f"pub const {label}_HOOK_MASK: u32 = 0x{mask:x};")
     L.append("")
     L.append("/// status error codes (protocol §5.1).")
     L.append("#[repr(u32)]")
@@ -246,8 +270,10 @@ def emit_kotlin(hooks: list[Hook], errs: list[Err], backends: list[Backend]) -> 
     L.append("    }")
     L.append("")
     L.append("    // Hooks owned by each backend: apply `mask and own`.")
-    for b in KNOWN_BACKENDS:
-        L.append(f"    const val {upper(b)}_HOOK_MASK = 0x{backend_mask(hooks, b):x}")
+    L.append("    // KPM is the subset of the kernel hooks the KPM backend installs.")
+    for label, backend, kpm_only in EMIT_MASKS:
+        mask = backend_mask(hooks, backend, kpm_only=kpm_only)
+        L.append(f"    const val {label}_HOOK_MASK = 0x{mask:x}")
     L.append("")
     L.append("    /** status error codes (protocol §5.1). */")
     L.append("    enum class StatusError(")
