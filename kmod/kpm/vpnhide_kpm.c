@@ -181,8 +181,10 @@ static void cfg_write_end(void)
 static int hook_active(uint32_t hook_id)
 {
 	uid_t uid = current_uid();
-	uint32_t s1, s2;
-	int result;
+	/* s2=0: an odd s1 can never equal 0 — the odd-first-iteration path
+	 * always retries (final-review M1). */
+	uint32_t s1, s2 = 0;
+	int result = 0;
 
 	do {
 		s1 = __atomic_load_n(&cfg_seq, __ATOMIC_ACQUIRE);
@@ -327,8 +329,8 @@ static const char *netdev_name(void *dev)
  * so this normally makes a single pass. */
 static int kpm_prefix_rule_hit(const char *ifname, const unsigned char *addr)
 {
-	uint32_t s1, s2;
-	int hit, i;
+	uint32_t s1, s2 = 0;
+	int hit = 0, i;
 
 	if (!ifname)
 		return 0;
@@ -354,8 +356,8 @@ static int kpm_prefix_rule_hit(const char *ifname, const unsigned char *addr)
  * environment has no guaranteed memcpy (same idiom as iface_is_vpn). */
 static int kpm_snapshot_prefix_rules(struct vpnhide_prefix_rule *snap)
 {
-	uint32_t s1, s2;
-	int n, i, j;
+	uint32_t s1, s2 = 0;
+	int n = 0, i, j;
 
 	do {
 		s1 = __atomic_load_n(&cfg_seq, __ATOMIC_ACQUIRE);
