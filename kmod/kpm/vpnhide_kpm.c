@@ -920,17 +920,46 @@ static void rt6_fill_before(hook_fargs12_t *fargs, void *udata)
 	void *skb = (void *)fargs->arg1;
 	void *rt = (void *)fargs->arg2;
 	void *dev;
+	int active, prefix_on, filter;
 
 	fargs->local.data0 = 0;
-	if (!hook_active(VPNHIDE_HOOK_RT6_FILL_NODE) || !skb || !rt)
+	active = hook_active(VPNHIDE_HOOK_RT6_FILL_NODE);
+	prefix_on = nr_prefix_rules > 0 &&
+		    vpnhide_uid_prefix_filtered((unsigned int)current_uid());
+	/* uid_target: "enabled" stats semantics (the .ko's rt6_fill_entry,
+	 * merged form) — per-uid row iff this reader is a target with the hook
+	 * enabled, sentinel global row otherwise. */
+	fargs->local.data3 = (uint64_t)active;
+	if ((!active && !prefix_on) || !skb || !rt)
 		return;
 	dev = dev_from_fib6_info(rt);
 	if (!dev)
 		return;
-	/* Hide the route if its output dev is a VPN iface, OR it is a public /128
-	 * host-route pinned to a physical uplink (parity with the .ko). */
-	if (!iface_is_vpn(netdev_name(dev)) &&
-	    !kpm_is_public_host_route6(rt, dev))
+
+	/* Per-uid reasons, only when the hook is active for this reader: the
+	 * output dev is a VPN iface, OR a public /128 host-route pinned to a
+	 * physical uplink (parity with the .ko). */
+	filter = 0;
+	if (active && (iface_is_vpn(netdev_name(dev)) ||
+		       kpm_is_public_host_route6(rt, dev)))
+		filter = 1;
+
+	/* Global prefix-rule destination: hide a route whose DESTINATION
+	 * (rt6key.addr — the route's own plen is never consulted) falls inside
+	 * a rule prefix on this iface. Same offset select as
+	 * kpm_is_public_host_route6; a 0 offset disables the check (safe
+	 * degrade on kvers with an unpopulated table entry). */
+	if (!filter && prefix_on) {
+		unsigned int dst_off = off->rt6_via_dst ?
+					       off->rt6_dst :
+					       off->fib6_info_fib6_dst;
+
+		if (dst_off &&
+		    kpm_prefix_rule_hit(netdev_name(dev),
+					(const unsigned char *)rt + dst_off))
+			filter = 1;
+	}
+	if (!filter)
 		return;
 
 	fargs->local.data0 = 1;
@@ -949,7 +978,10 @@ static void rt6_fill_after(hook_fargs12_t *fargs, void *udata)
 		_skb_trim((void *)fargs->local.data1,
 			  (unsigned int)fargs->local.data2);
 	fargs->ret = 0;
-	record_hook_hit(VPNHIDE_HOOK_RT6_FILL_NODE);
+	if (fargs->local.data3)
+		record_hook_hit(VPNHIDE_HOOK_RT6_FILL_NODE);
+	else
+		record_global_hook_hit(VPNHIDE_HOOK_RT6_FILL_NODE);
 }
 
 /* ================================================================== */
