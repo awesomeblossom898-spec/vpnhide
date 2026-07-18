@@ -303,7 +303,8 @@ static ssize_t ctl_write(struct file *file, const char __user *ubuf,
 	spin_unlock(&targets_lock);
 	WRITE_ONCE(debug_enabled, dbg ? true : false);
 
-	pr_info(MODNAME ": config applied — %d targets, %d prefix rules, debug=%d\n",
+	pr_info(MODNAME
+		": config applied — %d targets, %d prefix rules, debug=%d\n",
 		n, np, dbg);
 	return count;
 }

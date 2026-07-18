@@ -619,10 +619,11 @@ static inline int vpnhide_streq(const char *a, const char *b)
  * rule's prefix — global). Same down-only in-place copy as
  * vpnhide_compact_seq_lines, so a forward byte loop is safe. Returns new length.
  */
-static inline unsigned long vpnhide_compact_if_inet6_lines(
-	char *buf, unsigned long start, unsigned long count,
-	vpnhide_match_fn vpn_match, const struct vpnhide_prefix_rule *rules,
-	int nr_rules)
+static inline unsigned long
+vpnhide_compact_if_inet6_lines(char *buf, unsigned long start,
+			       unsigned long count, vpnhide_match_fn vpn_match,
+			       const struct vpnhide_prefix_rule *rules,
+			       int nr_rules)
 {
 	unsigned long src = start;
 	unsigned long dst = start;

@@ -240,12 +240,13 @@ static void test_compact_if_inet6(void)
 	/* vpn_match NULL (per-uid VPN path inactive) -> only the prefix rule fires:
 	 * the global v6 on rmnet_data1 goes; rmnet_data3 (same prefix, other iface)
 	 * and the fe80 link-local on rmnet_data1 (not in 2401:4900::/32) stay. */
-	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf), (vpnhide_match_fn)0,
-					   rules, 1);
+	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf),
+					   (vpnhide_match_fn)0, rules, 1);
 	buf[n] = '\0';
-	expect_str("if_inet6: rmnet_data1 global v6 removed", buf,
-		   "24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3\n"
-		   "fe800000000000005042d7fffe000001 1e 40 20 80 rmnet_data1\n");
+	expect_str(
+		"if_inet6: rmnet_data1 global v6 removed", buf,
+		"24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3\n"
+		"fe800000000000005042d7fffe000001 1e 40 20 80 rmnet_data1\n");
 }
 
 int main(void)
