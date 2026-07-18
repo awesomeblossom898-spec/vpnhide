@@ -98,8 +98,23 @@ static uint32_t last_error;
 static uint32_t stats_used[MAX_TARGET_UIDS];
 static uint32_t stats_uids[MAX_TARGET_UIDS];
 static unsigned long long stats_counts[MAX_TARGET_UIDS][VPNHIDE_HOOK_COUNT];
+/* +1 hook-row of headroom for the uid-independent global prefix-hit stats
+ * (sentinel-uid rows appended after the per-uid rows at snapshot time). */
 static struct vpnhide_stat_entry
-	stats_snapshot[MAX_TARGET_UIDS * VPNHIDE_HOOK_COUNT];
+	stats_snapshot[MAX_TARGET_UIDS * VPNHIDE_HOOK_COUNT +
+		       VPNHIDE_HOOK_COUNT];
+
+/* Global IPv6 prefix rules (protocol §4.3 `prefix` records). Same seqlock
+ * discipline as targets[]: writers hold the cfg_writer gate with cfg_seq odd;
+ * readers scan under matching even-seq reads and retry on a concurrent write. */
+static struct vpnhide_prefix_rule prefix_rules[MAX_PREFIX_RULES];
+static int nr_prefix_rules;
+
+/* Global (uid-independent) hook hits — prefix-rule matches fired by non-target
+ * UIDs, reported under the VPNHIDE_GLOBAL_STATS_UID sentinel row so they never
+ * consume the per-UID slot table or mask a real target's stats. Atomic
+ * increments only (the per-uid slot machinery is overkill for one row). */
+static unsigned long long global_stats_counts[VPNHIDE_HOOK_COUNT];
 
 /* kernel functions resolved at init via kallsyms */
 static void *(*_proc_create_data)(const char *, uint16_t, void *, void *,
@@ -245,6 +260,12 @@ static void record_hook_hit(uint32_t hook_id)
 		__sync_fetch_and_add(&stats_counts[slot][hook_id], 1ULL);
 }
 
+static void record_global_hook_hit(uint32_t hook_id)
+{
+	if (hook_id < VPNHIDE_HOOK_COUNT)
+		__sync_fetch_and_add(&global_stats_counts[hook_id], 1ULL);
+}
+
 static int snapshot_stats(struct vpnhide_stat_entry *out, int max)
 {
 	int i, hook, n = 0;
@@ -263,6 +284,17 @@ static int snapshot_stats(struct vpnhide_stat_entry *out, int max)
 			out[n].count = count;
 			n++;
 		}
+	}
+	for (hook = 0; hook < VPNHIDE_HOOK_COUNT && n < max; hook++) {
+		unsigned long long count = __atomic_load_n(
+			&global_stats_counts[hook], __ATOMIC_RELAXED);
+
+		if (count == 0)
+			continue;
+		out[n].uid = VPNHIDE_GLOBAL_STATS_UID;
+		out[n].hook_id = (unsigned int)hook;
+		out[n].count = count;
+		n++;
 	}
 	return n;
 }
@@ -285,6 +317,34 @@ static int iface_is_vpn(const char *name)
 static const char *netdev_name(void *dev)
 {
 	return dev ? (const char *)((char *)dev + off->netdev_name) : 0;
+}
+
+/* True when a prefix rule on `ifname` covers `addr` (16 bytes). Seqlock read
+ * side — same pattern as hook_active: scan the live array under a consistent
+ * even-seq snapshot and retry on a concurrent write. Config writes are rare,
+ * so this normally makes a single pass. */
+static int kpm_prefix_rule_hit(const char *ifname, const unsigned char *addr)
+{
+	uint32_t s1, s2;
+	int hit, i;
+
+	if (!ifname)
+		return 0;
+	do {
+		s1 = __atomic_load_n(&cfg_seq, __ATOMIC_ACQUIRE);
+		if (s1 & 1u)
+			continue; /* a writer is mid-update */
+		hit = 0;
+		for (i = 0; i < nr_prefix_rules; i++) {
+			if (vpnhide_streq(prefix_rules[i].ifname, ifname) &&
+			    vpnhide_prefix_match(addr, &prefix_rules[i])) {
+				hit = 1;
+				break;
+			}
+		}
+		s2 = __atomic_load_n(&cfg_seq, __ATOMIC_ACQUIRE);
+	} while (s1 != s2);
+	return hit;
 }
 
 /* True when `dev` (a route's output device) is physical AND the route is a
@@ -1046,6 +1106,8 @@ static void apply_targets(const char *s)
 	}
 	nr_targets = cnt;
 	active_hook_mask = compute_active_hook_mask(cnt);
+	nr_prefix_rules =
+		0; /* a config write replaces ENTIRE state — rules too. */
 	cfg_write_end();
 	vpnhide_dbg("loaded %d target UIDs\n", cnt);
 }
@@ -1182,11 +1244,13 @@ static long vpnhide_kpm_ctl0(const char *args, char *__user out_msg, int outlen)
 		 * writer gate. A bad header/version never touches live state; a
 		 * concurrent ctl0 writer gets -2 (busy) and userspace retries. */
 		struct vpnhide_target new_targets[MAX_TARGET_UIDS];
+		struct vpnhide_prefix_rule new_rules[MAX_PREFIX_RULES];
 		int dbg = -1; /* absent debug record preserves live value */
-		int i, n;
+		int i, n, nr;
 
-		n = vpnhide_parse_config(args, n_args, new_targets,
-					 MAX_TARGET_UIDS, &dbg);
+		n = vpnhide_parse_config_ex(args, n_args, new_targets,
+					    MAX_TARGET_UIDS, &dbg, new_rules,
+					    MAX_PREFIX_RULES, &nr);
 		if (n < 0)
 			return -1; /* rejected whole (bad header / version) */
 		if (!cfg_try_write_begin())
@@ -1194,12 +1258,16 @@ static long vpnhide_kpm_ctl0(const char *args, char *__user out_msg, int outlen)
 		for (i = 0; i < n; i++)
 			targets[i] = new_targets[i];
 		nr_targets = n;
+		for (i = 0; i < nr; i++)
+			prefix_rules[i] = new_rules[i];
+		nr_prefix_rules = nr;
 		active_hook_mask = compute_active_hook_mask(n);
 		if (dbg >= 0)
 			debug_enabled = dbg ? true : false;
 		cfg_write_end();
-		vpnhide_dbg("ctl0 config: %d targets, debug=%d\n", n,
-			    debug_enabled ? 1 : 0);
+		vpnhide_dbg(
+			"ctl0 config: %d targets, %d prefix rules, debug=%d\n",
+			n, nr, debug_enabled ? 1 : 0);
 		return 0;
 	}
 
@@ -1208,9 +1276,10 @@ static long vpnhide_kpm_ctl0(const char *args, char *__user out_msg, int outlen)
 		unsigned long available, full, n;
 
 		if (kind == VPNHIDE_KIND_STATS) {
-			int count = snapshot_stats(stats_snapshot,
-						   MAX_TARGET_UIDS *
-							   VPNHIDE_HOOK_COUNT);
+			int count = snapshot_stats(
+				stats_snapshot,
+				MAX_TARGET_UIDS * VPNHIDE_HOOK_COUNT +
+					VPNHIDE_HOOK_COUNT);
 
 			full = vpnhide_format_stats(buf, sizeof(buf),
 						    stats_snapshot, count);
