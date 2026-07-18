@@ -71,9 +71,10 @@ Key consequences:
       any arm64 kernel, but only catches libc-routed calls (a raw `svc #0` slips
       past) and runs in-process, visible to aggressive anti-tamper.
   The small deltas between backends — e.g. Zygisk also filters
-  `/proc/net/{if_inet6,tcp,tcp6}`, kmod/KPM also handle `RTM_GETRULE` and the
-  server host-route — are noted in the matrix; neither delta is a reason to
-  stack native backends.
+  `/proc/net/{tcp,tcp6}`, and of the kernel backends only the `.ko` (not KPM)
+  joins Zygisk in filtering `/proc/net/if_inet6`; kmod/KPM also handle
+  `RTM_GETRULE` and the server host-route — are noted in the matrix; neither
+  delta is a reason to stack native backends.
 - So a complete install is **two components**: exactly one native backend (kmod,
   KPM, or Zygisk) **plus** lsposed — which covers both the Java network vectors
   and package visibility — with SELinux as an unreliable platform backstop
@@ -282,7 +283,7 @@ detectors actually probe:
 
 | Layer | Entry points |
 |---|---|
-| kmod | `kmod/vpnhide_kmod.c` (10 kretprobes); iface matcher `kmod/generated/iface_lists.h` |
+| kmod | `kmod/vpnhide_kmod.c` (11 kretprobes); iface matcher `kmod/generated/iface_lists.h` |
 | KPM | `kmod/kpm/vpnhide_kpm.c` (KernelPatch inline hooks + ctl0); offsets in `kmod/kpm/kver_offsets.h` |
 | zygisk | `zygisk/src/hooks.rs` (ioctl/getifaddrs/openat/recv*); `zygisk/src/filter.rs` (procfs + netlink filters) |
 | lsposed | `lsposed/app/.../HookEntry.kt`, `PackageVisibilityHooks.kt`; iface matcher `.../generated/IfaceLists.kt` |
