@@ -1039,9 +1039,10 @@ static struct kretprobe fib_route_krp = {
 /* ================================================================== */
 /*  Hook 7: ipv6_route_seq_show — /proc/net/ipv6_route                */
 /*                                                                    */
-/*  IPv6 route lines store the interface name in the final field.     */
-/*  We compact VPN lines out of the seq_file buffer, matching the     */
-/*  IPv4 /proc/net/route strategy above.                              */
+/*  IPv6 route lines store the route destination in the first field   */
+/*  and the interface name in the last. We compact out lines that a   */
+/*  VPN-iface match (per-uid) or a global prefix rule covers,         */
+/*  mirroring the if6_seq strategy.                                   */
 /* ================================================================== */
 
 static int ipv6_route_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
@@ -1049,7 +1050,8 @@ static int ipv6_route_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	struct fib_route_data *data = (void *)ri->data;
 
 	data->seq = (struct seq_file *)regs->regs[0];
-	data->target = hook_active(VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW);
+	data->target = hook_active(VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW) ||
+		       READ_ONCE(prefix_rules_present);
 
 	if (data->target && data->seq) {
 		data->start_count = data->seq->count;
@@ -1066,22 +1068,50 @@ static int ipv6_route_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
 	struct fib_route_data *data = (void *)ri->data;
 	struct seq_file *seq = data->seq;
+	struct vpnhide_prefix_rule snap[MAX_PREFIX_RULES];
+	vpnhide_match_fn vpn_match;
 	unsigned long newc;
+	int np;
 
 	if (!data->target || !seq || !seq->buf)
 		return 0;
 	if (seq->count <= data->start_count)
 		return 0;
 
-	/* Same as fib_route_ret but the iface name is the LAST whitespace field
-	 * of each /proc/net/ipv6_route line — the shared compactor handles both
-	 * via the field selector. */
-	newc = vpnhide_compact_seq_lines(seq->buf, data->start_count,
-					 seq->count, VPNHIDE_FIELD_LAST,
-					 vpnhide_iface_is_vpn);
+	/* Same reader-uid gate as if6_seq_ret: prefix rules filter only
+	 * app/shell readers; system readers (e.g. networkstack) must keep
+	 * seeing real routes or network provisioning wedges (on-device
+	 * finding 2026-07-18). For other readers pass no rules (np = 0). */
+	if (vpnhide_uid_prefix_filtered(
+		    from_kuid(&init_user_ns, current_uid()))) {
+		/* Snapshot prefix rules under the lock; the compactor is
+		 * freestanding and must not take kernel locks itself. */
+		spin_lock(&targets_lock);
+		np = nr_prefix_rules;
+		memcpy(snap, prefix_rules, (size_t)np * sizeof(*snap));
+		spin_unlock(&targets_lock);
+	} else {
+		np = 0;
+	}
+
+	/* /proc/net/ipv6_route keeps the route destination in the FIRST
+	 * field and the iface name in the LAST — the same two fields the
+	 * if_inet6 compactor tokenizes, so it doubles as the route
+	 * compactor: a line drops when the per-uid vpn_match fires on the
+	 * iface or a global prefix rule covers the route destination. */
+	vpn_match = hook_active(VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW) ?
+			    vpnhide_iface_is_vpn :
+			    (vpnhide_match_fn)0;
+
+	newc = vpnhide_compact_if_inet6_lines(seq->buf, data->start_count,
+					      seq->count, vpn_match, snap, np);
 	if (newc != seq->count) {
 		seq->count = newc;
-		record_hook_hit(VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW);
+		if (vpn_match)
+			record_hook_hit(VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW);
+		else
+			record_global_hook_hit(
+				VPNHIDE_HOOK_IPV6_ROUTE_SEQ_SHOW);
 	}
 	return 0;
 }
