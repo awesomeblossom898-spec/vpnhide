@@ -1352,7 +1352,7 @@ struct route_skb_data {
 	struct sk_buff *skb;
 	unsigned int saved_len;
 	bool should_filter;
-	bool uid_target; /* per-uid reason fired; false = global prefix only */
+	bool uid_target; /* filtering UID is a target (per-uid) vs global-only */
 };
 
 static void init_route_skb_data(struct route_skb_data *data)
@@ -1493,7 +1493,7 @@ static int rt6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 			data->skb = (struct sk_buff *)regs->regs[1];
 			data->saved_len = data->skb ? data->skb->len : 0;
 			data->should_filter = true;
-			data->uid_target = vpn_route || host_hint;
+			data->uid_target = active;
 			vpnhide_dbg("rt6_fill_entry: hiding %s via %s\n",
 				    vpn_route ?
 					    "VPN route" :
