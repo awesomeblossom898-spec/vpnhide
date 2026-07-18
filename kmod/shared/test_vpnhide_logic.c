@@ -320,6 +320,47 @@ static void test_compact_if_inet6_vpn_and_edges(void)
 	}
 }
 
+static void test_compact_ipv6_route_prefix(void)
+{
+	/* /proc/net/ipv6_route: "<dst32> <plen> <src32> <srcplen> <nh32>
+	 * <metric> <ref> <use> <flags> <name>" — the compactor reads only the
+	 * FIRST (dst) and LAST (ifname) fields, exactly like if_inet6. */
+	char buf[640] =
+		"24014900a3f1e04d0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n"
+		"fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n"
+		"24014900a41fb57c0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data3\n"
+		"ff000000000000000000000000000000 08 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n"
+		"24014900a3f1e04d54fdd7fffeb173bf 80 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1";
+	/* rule: hide 2401:4900::/32 on rmnet_data1 only */
+	struct vpnhide_prefix_rule rules[1];
+	unsigned long n;
+
+	memset(&rules[0], 0, sizeof(rules[0]));
+	strcpy(rules[0].ifname, "rmnet_data1");
+	rules[0].addr[0] = 0x24;
+	rules[0].addr[1] = 0x01;
+	rules[0].addr[2] = 0x49;
+	rules[0].addr[3] = 0x00;
+	rules[0].prefix_len = 32;
+
+	/* vpn_match NULL -> only prefix rules fire: the rmnet_data1 /64 subnet
+	 * route and the /128 host route inside 2401:4900::/32 go (the route's
+	 * own plen field is never consulted); the fe80 link route (outside
+	 * the rule), the rmnet_data3 /64 (other iface), and the ff00::/8
+	 * multicast route (outside the rule) stay. The last input line has
+	 * NO trailing newline and is dropped, so the kept lines' original
+	 * bytes (with their newlines) survive verbatim. */
+	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf),
+					   (vpnhide_match_fn)0, rules, 1);
+	buf[n] = '\0';
+	expect_str(
+		"ipv6_route: prefix-dest routes removed, link/mcast/other-iface kept",
+		buf,
+		"fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n"
+		"24014900a41fb57c0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data3\n"
+		"ff000000000000000000000000000000 08 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n");
+}
+
 int main(void)
 {
 	test_route_first_field();
@@ -333,6 +374,7 @@ int main(void)
 	test_uid_prefix_filtered();
 	test_compact_if_inet6();
 	test_compact_if_inet6_vpn_and_edges();
+	test_compact_ipv6_route_prefix();
 
 	if (failures) {
 		fprintf(stderr, "%d test(s) failed\n", failures);
