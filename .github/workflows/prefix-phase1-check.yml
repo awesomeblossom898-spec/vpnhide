@@ -68,7 +68,10 @@ jobs:
         run: |
           set -euxo pipefail
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKMANAGER" --licenses > /dev/null
+          # (yes || true): under pipefail, plain `yes` dies with SIGPIPE (141)
+          # once sdkmanager stops reading and would fail the step; the subshell
+          # swallows it so the pipeline exit status stays sdkmanager's own.
+          (yes || true) | "$SDKMANAGER" --licenses > /dev/null
           "$SDKMANAGER" --list_installed | grep -q "platforms;android-37" || "$SDKMANAGER" "platforms;android-37"
 
       - name: Cache gradle
