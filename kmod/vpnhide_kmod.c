@@ -1352,6 +1352,7 @@ struct route_skb_data {
 	struct sk_buff *skb;
 	unsigned int saved_len;
 	bool should_filter;
+	bool uid_target; /* per-uid reason fired; false = global prefix only */
 };
 
 static void init_route_skb_data(struct route_skb_data *data)
@@ -1359,6 +1360,7 @@ static void init_route_skb_data(struct route_skb_data *data)
 	data->skb = NULL;
 	data->saved_len = 0;
 	data->should_filter = false;
+	data->uid_target = true;
 }
 
 static int route_skb_ret(struct route_skb_data *data, struct pt_regs *regs,
@@ -1372,7 +1374,10 @@ static int route_skb_ret(struct route_skb_data *data, struct pt_regs *regs,
 			    data->skb->len, data->saved_len);
 		skb_trim(data->skb, data->saved_len);
 		regs_set_return_value(regs, 0);
-		record_hook_hit(hook_id);
+		if (data->uid_target)
+			record_hook_hit(hook_id);
+		else
+			record_global_hook_hit(hook_id);
 	}
 	return 0;
 }
@@ -1448,10 +1453,14 @@ static int rt6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	struct dst_entry *dst = (struct dst_entry *)regs->regs[3];
 	struct net_device *dev = NULL;
 	char dev_name[IFNAMSIZ];
+	unsigned int uid = from_kuid(&init_user_ns, current_uid());
+	bool active = hook_active(VPNHIDE_HOOK_RT6_FILL_NODE);
+	bool prefix_on = READ_ONCE(prefix_rules_present) &&
+			 vpnhide_uid_prefix_filtered(uid);
 
 	init_route_skb_data(data);
 
-	if (!hook_active(VPNHIDE_HOOK_RT6_FILL_NODE))
+	if (!active && !prefix_on)
 		return 0;
 
 	rcu_read_lock();
@@ -1459,17 +1468,37 @@ static int rt6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	if (!dev && dst)
 		copy_from_kernel_nofault(&dev, &dst->dev, sizeof(dev));
 	if (copy_dev_name(dev, dev_name)) {
-		bool vpn_route = is_vpn_ifname(dev_name);
-		bool host_hint = !vpn_route &&
+		bool vpn_route = active && is_vpn_ifname(dev_name);
+		bool host_hint = active && !vpn_route &&
 				 is_public_host_route6_via_physical(rt, dev);
+		bool prefix_hit = false;
 
-		if (vpn_route || host_hint) {
+		if (prefix_on && !vpn_route) {
+			struct in6_addr dst_addr;
+
+			/* fib6_dst (rt6key { addr; plen }) is stable across
+			 * GKI 5.10..6.12; fault-safe read, mirroring
+			 * is_public_host_route6_via_physical. A route whose
+			 * destination falls inside a rule prefix on this
+			 * iface leaks that prefix (e.g. the RA /64) — hide
+			 * it for app/shell readers. */
+			if (!copy_from_kernel_nofault(&dst_addr,
+						      &rt->fib6_dst.addr,
+						      sizeof(dst_addr)))
+				prefix_hit = prefix_rule_hits(dev_name,
+							      dst_addr.s6_addr);
+		}
+
+		if (vpn_route || host_hint || prefix_hit) {
 			data->skb = (struct sk_buff *)regs->regs[1];
 			data->saved_len = data->skb ? data->skb->len : 0;
 			data->should_filter = true;
+			data->uid_target = vpn_route || host_hint;
 			vpnhide_dbg("rt6_fill_entry: hiding %s via %s\n",
-				    vpn_route ? "VPN route" :
-						"public host route",
+				    vpn_route ?
+					    "VPN route" :
+					    (host_hint ? "public host route" :
+							 "prefix rule"),
 				    dev_name);
 		}
 	}
