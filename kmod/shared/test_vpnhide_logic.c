@@ -207,6 +207,47 @@ static void test_prefix_match(void)
 	expect_int("prefix /129 reject", vpnhide_prefix_match(a, &r), 0);
 }
 
+static void test_compact_if_inet6(void)
+{
+	/* /proc/net/if_inet6: "<32hex addr> <ifindex> <plen> <scope> <flags> <name>" */
+	char buf[512] =
+		"24014900a3f1e04d54fdd7fffeb173bf 1e 40 00 00 rmnet_data1\n"
+		"24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3\n"
+		"fe800000000000005042d7fffe000001 1e 40 20 80 rmnet_data1\n";
+	/* rule: hide 2401:4900::/32 on rmnet_data1 only */
+	struct vpnhide_prefix_rule rules[1];
+	unsigned long n;
+
+	memset(&rules[0], 0, sizeof(rules[0]));
+	rules[0].ifname[0] = 'r';
+	rules[0].ifname[1] = 'm';
+	rules[0].ifname[2] = 'n';
+	rules[0].ifname[3] = 'e';
+	rules[0].ifname[4] = 't';
+	rules[0].ifname[5] = '_';
+	rules[0].ifname[6] = 'd';
+	rules[0].ifname[7] = 'a';
+	rules[0].ifname[8] = 't';
+	rules[0].ifname[9] = 'a';
+	rules[0].ifname[10] = '1';
+	rules[0].ifname[11] = '\0';
+	rules[0].addr[0] = 0x24;
+	rules[0].addr[1] = 0x01;
+	rules[0].addr[2] = 0x49;
+	rules[0].addr[3] = 0x00;
+	rules[0].prefix_len = 32;
+
+	/* vpn_match NULL (per-uid VPN path inactive) -> only the prefix rule fires:
+	 * the global v6 on rmnet_data1 goes; rmnet_data3 (same prefix, other iface)
+	 * and the fe80 link-local on rmnet_data1 (not in 2401:4900::/32) stay. */
+	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf), (vpnhide_match_fn)0,
+					   rules, 1);
+	buf[n] = '\0';
+	expect_str("if_inet6: rmnet_data1 global v6 removed", buf,
+		   "24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3\n"
+		   "fe800000000000005042d7fffe000001 1e 40 20 80 rmnet_data1\n");
+}
+
 int main(void)
 {
 	test_route_first_field();
@@ -217,6 +258,7 @@ int main(void)
 	test_is_physical_iface();
 	test_parse_uids();
 	test_prefix_match();
+	test_compact_if_inet6();
 
 	if (failures) {
 		fprintf(stderr, "%d test(s) failed\n", failures);

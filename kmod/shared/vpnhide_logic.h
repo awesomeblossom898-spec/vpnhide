@@ -595,6 +595,106 @@ static inline int vpnhide_prefix_match(const unsigned char addr[16],
 	return 1;
 }
 
+/* Freestanding NUL-terminated string equality. */
+static inline int vpnhide_streq(const char *a, const char *b)
+{
+	unsigned int i = 0;
+
+	if (!a || !b)
+		return 0;
+	while (a[i] && b[i]) {
+		if (a[i] != b[i])
+			return 0;
+		i++;
+	}
+	return a[i] == b[i];
+}
+
+/*
+ * Compact /proc/net/if_inet6 lines in place. Each line is
+ *   "<32-hex addr> <ifindex> <plen> <scope> <flags> <devname>"
+ * (address = FIRST field, devname = LAST field). A line is dropped when
+ * `vpn_match` is non-NULL and matches devname (per-uid VPN hiding), OR when any
+ * rule matches (devname equals rule->ifname AND the address is within the
+ * rule's prefix — global). Same down-only in-place copy as
+ * vpnhide_compact_seq_lines, so a forward byte loop is safe. Returns new length.
+ */
+static inline unsigned long vpnhide_compact_if_inet6_lines(
+	char *buf, unsigned long start, unsigned long count,
+	vpnhide_match_fn vpn_match, const struct vpnhide_prefix_rule *rules,
+	int nr_rules)
+{
+	unsigned long src = start;
+	unsigned long dst = start;
+
+	if (!buf || count <= start)
+		return count;
+
+	while (src < count) {
+		unsigned long nl = src;
+		unsigned long line_end, line_len, fs, fe, ts, te;
+		unsigned char addr[16];
+		char ifname[VPNHIDE_IFNAMSIZ];
+		int have_addr, have_name, hide = 0, i;
+
+		while (nl < count && buf[nl] != '\n')
+			nl++;
+		line_end = (nl < count) ? nl + 1 : count;
+		line_len = line_end - src;
+
+		/* first token: the 32-hex address */
+		fs = src;
+		while (fs < line_end && (buf[fs] == ' ' || buf[fs] == '\t'))
+			fs++;
+		fe = fs;
+		while (fe < line_end && buf[fe] != ' ' && buf[fe] != '\t' &&
+		       buf[fe] != '\n')
+			fe++;
+		have_addr = vpnhide_tok_addr32(buf, fs, fe, addr);
+
+		/* last token: the devname */
+		te = line_end;
+		while (te > src &&
+		       (buf[te - 1] == '\n' || buf[te - 1] == '\r' ||
+			buf[te - 1] == ' ' || buf[te - 1] == '\t'))
+			te--;
+		ts = te;
+		while (ts > src && buf[ts - 1] != ' ' && buf[ts - 1] != '\t')
+			ts--;
+		have_name = vpnhide_tok_ifname(buf, ts, te, ifname);
+
+		if (have_name) {
+			if (vpn_match && vpn_match(ifname))
+				hide = 1;
+			if (!hide && have_addr && rules) {
+				for (i = 0; i < nr_rules; i++) {
+					if (vpnhide_streq(ifname,
+							  rules[i].ifname) &&
+					    vpnhide_prefix_match(addr,
+								 &rules[i])) {
+						hide = 1;
+						break;
+					}
+				}
+			}
+		}
+
+		if (hide) {
+			src = line_end;
+			continue;
+		}
+		if (dst != src) {
+			unsigned long k;
+
+			for (k = 0; k < line_len; k++)
+				buf[dst + k] = buf[src + k];
+		}
+		dst += line_len;
+		src = line_end;
+	}
+	return dst;
+}
+
 /* --- header (§4.2) --------------------------------------------------- */
 
 /*
