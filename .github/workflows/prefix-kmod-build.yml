@@ -3,7 +3,7 @@
 # image, but its activator dependency runs in the PRIVATE fork ci image that
 # does not exist on a fork. This workflow rebuilds the activator on a plain
 # ubuntu runner, then reuses the exact stock kmod build in the public ddk-min
-# container — for just the two KMIs we target. NOT for upstream.
+# container — for just the two KMIs we target. NOT for upstream. The kpm job builds the cross-version KPM zip with the public KernelPatch submodule (stock ci.yml's kpm job needs the private ci image).
 name: prefix-kmod-build
 
 on:
@@ -74,4 +74,35 @@ jobs:
         with:
           name: vpnhide-kmod-${{ matrix.kmi }}
           path: vpnhide-kmod-${{ matrix.kmi }}.zip
+          if-no-files-found: error
+
+  kpm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive # public KernelPatch headers for `make kpm`
+          fetch-depth: 0 # get_build_version's `git describe`
+
+      - name: Mark workspace safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Rust target + cargo-ndk + clang/lld
+        run: |
+          set -euxo pipefail
+          rustup target add aarch64-linux-android
+          cargo install cargo-ndk --locked
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang lld make
+
+      - name: Build KPM module zip
+        run: |
+          set -euxo pipefail
+          export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+          python3 kmod/kpm/build.py
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vpnhide-kpm
+          path: vpnhide-kpm.zip
           if-no-files-found: error
