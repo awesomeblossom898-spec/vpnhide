@@ -13,7 +13,6 @@ and status error codes for every language that touches the protocol:
   - kmod/KPM   C   -> kmod/generated/hook_ids.h
   - protocol   Rust-> crates/protocol/src/generated/hook_ids.rs
   - zygisk     Rust-> zygisk/src/generated/hook_ids.rs
-  - lsposed    Rust-> lsposed/native/src/generated/hook_ids.rs
   - app        Kotlin-> .../generated/HookIds.kt
 
 Re-run after editing data/hooks.toml and commit the regenerated files. CI's

@@ -160,11 +160,12 @@ impl NativeSelection {
                     return None;
                 }
                 let mask = match family {
-                    NativeHookFamily::Kernel => {
-                        names.iter().fold(0u32, |acc, name| acc | hook_bit(name)) & KERNEL_HOOK_MASK
-                    }
-                    NativeHookFamily::Kpm => {
-                        names.iter().fold(0u32, |acc, name| acc | hook_bit(name)) & KPM_HOOK_MASK
+                    // Same deduped shape as the Detailed arm below: Kernel and
+                    // KPM differ only in the ownership mask, so fold once and
+                    // project through the family's own full mask.
+                    NativeHookFamily::Kernel | NativeHookFamily::Kpm => {
+                        names.iter().fold(0u32, |acc, name| acc | hook_bit(name))
+                            & family.full_mask()
                     }
                     NativeHookFamily::Zygisk => ZYGISK_HOOK_MASK,
                 };
