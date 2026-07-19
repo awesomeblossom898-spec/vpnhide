@@ -83,7 +83,6 @@ internal fun PrefixRulesSettingsScreen(onBack: () -> Unit) {
         }
     var rules by remember(initialRules) { mutableStateOf(initialRules) }
     val dirty = rules != initialRules
-    val firstError = validateEditablePrefixRules(rules)
 
     BackHandler(onBack = onBack)
 
@@ -108,7 +107,7 @@ internal fun PrefixRulesSettingsScreen(onBack: () -> Unit) {
         bottomBar = {
             PrefixRulesSaveBar(
                 ruleCount = rules.size,
-                enabled = dirty && !saving && firstError == null,
+                enabled = dirty && !saving,
                 saving = saving,
                 onSave = {
                     attemptedSave = true
