@@ -25,6 +25,8 @@ internal enum class PrefixRuleIssue(
     TooManyRules(null),
 }
 
+// ruleIndex is -1 (and issue TooManyRules) for list-level cap violations —
+// never use it to index the rule list without checking issue first.
 internal data class PrefixRuleError(
     val ruleIndex: Int,
     val issue: PrefixRuleIssue,
@@ -37,8 +39,8 @@ internal fun CanonicalIpv6PrefixRule.toEditable(): EditablePrefixRule =
     EditablePrefixRule(iface = iface, prefix = prefix, prefixLen = prefixLen.toString())
 
 internal fun EditablePrefixRule.toCanonicalOrNull(): CanonicalIpv6PrefixRule? {
-    val plen = prefixLen.trim().toIntOrNull() ?: return null
-    return CanonicalIpv6PrefixRule(iface = iface.trim(), prefix = prefix.trim(), prefixLen = plen)
+    if (prefixRuleFieldError(this) != null) return null
+    return CanonicalIpv6PrefixRule(iface.trim(), prefix.trim(), prefixLen.trim().toInt())
 }
 
 // First invalid field of a single draft rule, or null when the rule is clean.

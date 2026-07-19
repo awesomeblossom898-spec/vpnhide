@@ -102,4 +102,12 @@ class Ipv6PrefixRulesDataTest {
         assertEquals(canonical, editable.toCanonicalOrNull())
         assertNull(EditablePrefixRule("a", "b", "x").toCanonicalOrNull())
     }
+
+    @Test
+    fun `whitespace padded fields validate and persist trimmed`() {
+        val padded = rule(iface = " rmnet_data0 ", prefix = " 2409:40e3:: ", prefixLen = " 32 ")
+        assertNull(validateEditablePrefixRules(listOf(padded)))
+        assertEquals(CanonicalIpv6PrefixRule("rmnet_data0", "2409:40e3::", 32), padded.toCanonicalOrNull())
+        assertNull(EditablePrefixRule("rmnet_data0", "2409:40e3::", "999").toCanonicalOrNull())
+    }
 }
