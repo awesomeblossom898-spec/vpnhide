@@ -205,12 +205,6 @@ pub fn filter_if_inet6_buf_ex(data: &mut [u8], rules: &[PrefixRule]) -> usize {
     filter_by_last_field_ex(data, rules)
 }
 
-/// Shared logic: filter lines where the LAST whitespace-delimited field
-/// is a VPN interface name (used by ipv6_route and if_inet6). Kept wrapper.
-fn filter_by_last_field(data: &mut [u8]) -> usize {
-    filter_by_last_field_ex(data, &[])
-}
-
 /// Shared logic: last-field VPN-name filtering plus the global prefix-rule
 /// path (first-field address hit on a rule-named iface).
 fn filter_by_last_field_ex(data: &mut [u8], rules: &[PrefixRule]) -> usize {
