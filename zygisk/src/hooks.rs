@@ -302,7 +302,10 @@ saved_original! {
 /// Replacement for `libc::getifaddrs`.
 ///
 /// Calls the real `getifaddrs`, then walks the returned linked list and
-/// unlinks every entry whose `ifa_name` matches a VPN prefix. The caller
+/// unlinks every entry whose `ifa_name` matches a VPN prefix — or whose
+/// v6 address falls inside a global prefix rule on that interface (the
+/// kernel `inet6_fill_ifaddr` path's parity; applies only in hooked target
+/// processes — the reader-uid gate is structural, see lib.rs). The caller
 /// still calls `freeifaddrs` on the head pointer we return; it walks only
 /// via `ifa_next`, so unlinked (VPN) nodes are leaked — a handful of
 /// ~200-byte `struct ifaddrs` per `getifaddrs` call, which is acceptable
@@ -342,6 +345,9 @@ pub unsafe extern "C" fn hooked_getifaddrs(ifap: *mut *mut libc::ifaddrs) -> c_i
     // unlinking the head works the same as unlinking an interior node.
     // `slot` always points at the ifa_next field (or the out-pointer *ifap
     // on the first iteration) whose value is the current entry.
+    // Rules hoisted out of the loop: one OnceLock read per getifaddrs call;
+    // an empty slice is a zero-cost fast path.
+    let rules = crate::prefix_rules();
     let mut slot: *mut *mut libc::ifaddrs = ifap;
     unsafe {
         while !(*slot).is_null() {
@@ -353,7 +359,19 @@ pub unsafe extern "C" fn hooked_getifaddrs(ifap: *mut *mut libc::ifaddrs) -> c_i
                 let name = core::ffi::CStr::from_ptr(name_ptr);
                 crate::filter::is_vpn_iface_cstr(name)
             };
-            if is_vpn {
+            // Global prefix rules (kernel inet6_fill_ifaddr parity): drop a
+            // v6 entry whose address falls inside a rule prefix on its
+            // iface. Family-gated: IPv4 is never prefix-filtered.
+            let is_pfx = if rules.is_empty() || name_ptr.is_null() || (*entry).ifa_addr.is_null() {
+                false
+            } else if (*(*entry).ifa_addr).sa_family as c_int != libc::AF_INET6 {
+                false
+            } else {
+                let name = core::ffi::CStr::from_ptr(name_ptr);
+                let sin6 = &*((*entry).ifa_addr as *const libc::sockaddr_in6);
+                crate::filter::prefix_rule_hit(rules, name.to_bytes(), &sin6.sin6_addr.s6_addr)
+            };
+            if is_vpn || is_pfx {
                 *slot = (*entry).ifa_next;
                 // `entry` is intentionally leaked; see the doc comment.
             } else {
