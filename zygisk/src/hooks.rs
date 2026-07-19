@@ -362,9 +362,11 @@ pub unsafe extern "C" fn hooked_getifaddrs(ifap: *mut *mut libc::ifaddrs) -> c_i
             // Global prefix rules (kernel inet6_fill_ifaddr parity): drop a
             // v6 entry whose address falls inside a rule prefix on its
             // iface. Family-gated: IPv4 is never prefix-filtered.
-            let is_pfx = if rules.is_empty() || name_ptr.is_null() || (*entry).ifa_addr.is_null() {
-                false
-            } else if (*(*entry).ifa_addr).sa_family as c_int != libc::AF_INET6 {
+            let is_pfx = if rules.is_empty()
+                || name_ptr.is_null()
+                || (*entry).ifa_addr.is_null()
+                || (*(*entry).ifa_addr).sa_family as c_int != libc::AF_INET6
+            {
                 false
             } else {
                 let name = core::ffi::CStr::from_ptr(name_ptr);
