@@ -487,6 +487,7 @@
     <string name="settings_auto_hide_saved">App hiding settings saved.</string>
     <string name="settings_auto_hide_failed">Failed to update app hiding settings.</string>
     <string name="settings_prefix_rules">IPv6 prefix rules</string>
+    <string name="settings_prefix_rules_sub">Hide configured IPv6 prefixes on matching interfaces</string>
     <string name="prefix_rules_help_body">Each rule hides global IPv6 addresses that fall within PREFIX/LEN on the named interface (kernel interface name, e.g. rmnet_data0) from apps. Up to 8 rules; rules apply to every app, targeted or not. The adb shell view (uid 2000) reflects only the kernel backends (.ko/KPM); the Zygisk backend filters inside hooked app processes instead.</string>
     <string name="prefix_rule_iface">Interface</string>
     <string name="prefix_rule_prefix">Prefix (IPv6)</string>

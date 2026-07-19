@@ -458,6 +458,7 @@
     <string name="settings_auto_hide_saved">Настройки скрытия приложений сохранены.</string>
     <string name="settings_auto_hide_failed">Не удалось обновить настройки скрытия приложений.</string>
     <string name="settings_prefix_rules">Правила префиксов IPv6</string>
+    <string name="settings_prefix_rules_sub">Скрывать заданные префиксы IPv6 на указанных интерфейсах</string>
     <string name="prefix_rules_help_body">Каждое правило скрывает глобальные адреса IPv6, попадающие в ПРЕФИКС/ДЛИНУ на указанном интерфейсе (имя интерфейса ядра, например rmnet_data0), от приложений. До 8 правил; правила действуют на все приложения, целевые или нет. Представление adb shell (uid 2000) отражает только ядерные бэкенды (.ko/KPM); бэкенд Zygisk фильтрует внутри процессов перехваченных приложений.</string>
     <string name="prefix_rule_iface">Интерфейс</string>
     <string name="prefix_rule_prefix">Префикс (IPv6)</string>

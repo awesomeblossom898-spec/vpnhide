@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -50,6 +51,7 @@ import androidx.compose.ui.unit.dp
 import dev.okhsunrog.vpnhide.ui.components.EnhancedButton
 import dev.okhsunrog.vpnhide.ui.components.EnhancedOutlinedButton
 import dev.okhsunrog.vpnhide.ui.components.GroupedCard
+import dev.okhsunrog.vpnhide.ui.components.PreferenceRow
 import dev.okhsunrog.vpnhide.ui.theme.AppColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -301,5 +303,18 @@ private fun PrefixRulesSaveBar(
                 Text(stringResource(R.string.btn_save))
             }
         }
+    }
+}
+
+@Composable
+internal fun PrefixRulesSettingsSection(onOpen: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        SettingsSectionHeader(stringResource(R.string.settings_prefix_rules))
+        PreferenceRow(
+            title = stringResource(R.string.settings_prefix_rules),
+            subtitle = stringResource(R.string.settings_prefix_rules_sub),
+            icon = Icons.Default.Public,
+            onClick = onOpen,
+        )
     }
 }

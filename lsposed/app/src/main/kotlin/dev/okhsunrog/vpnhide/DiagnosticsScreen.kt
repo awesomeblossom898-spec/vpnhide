@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.material.icons.filled.Stop
@@ -39,6 +40,7 @@ import dev.okhsunrog.vpnhide.generated.IfaceLists
 import dev.okhsunrog.vpnhide.ui.components.EnhancedButton
 import dev.okhsunrog.vpnhide.ui.components.EnhancedCard
 import dev.okhsunrog.vpnhide.ui.components.GroupedCard
+import dev.okhsunrog.vpnhide.ui.components.PreferenceRow
 import dev.okhsunrog.vpnhide.ui.components.SectionHeader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -499,6 +501,19 @@ private fun LogcatRecordCard(selfNeedsRestart: Boolean?) {
                 }
             }
         }
+    }
+}
+
+@Composable
+internal fun DiagnosticsSettingsSection(onOpen: () -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        SettingsSectionHeader(stringResource(R.string.settings_diagnostics_section))
+        PreferenceRow(
+            title = stringResource(R.string.settings_diagnostics_title),
+            subtitle = stringResource(R.string.settings_diagnostics_sub),
+            icon = Icons.Default.CheckCircle,
+            onClick = onOpen,
+        )
     }
 }
 

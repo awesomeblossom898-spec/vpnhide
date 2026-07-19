@@ -29,7 +29,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Animation
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
@@ -100,6 +99,7 @@ fun SettingsScreen(
     val interactor = LocalSettingsInteractor.current
     var diagnosticsOpen by remember { mutableStateOf(false) }
     var hiddenAppsOpen by remember { mutableStateOf(false) }
+    var prefixRulesOpen by remember { mutableStateOf(false) }
 
     if (diagnosticsOpen) {
         DiagnosticsSettingsScreen(
@@ -110,6 +110,10 @@ fun SettingsScreen(
     }
     if (hiddenAppsOpen) {
         HiddenAppsSettingsScreen(onBack = { hiddenAppsOpen = false })
+        return
+    }
+    if (prefixRulesOpen) {
+        PrefixRulesSettingsScreen { prefixRulesOpen = false }
         return
     }
 
@@ -236,6 +240,7 @@ fun SettingsScreen(
             UpdatesSettingsSection()
             AutoHideSettingsSection(onOpenHiddenApps = { hiddenAppsOpen = true })
             DiagnosticsSettingsSection(onOpen = { diagnosticsOpen = true })
+            PrefixRulesSettingsSection(onOpen = { prefixRulesOpen = true })
             DebugToolsSettingsSection(selfNeedsRestart = selfNeedsRestart)
             ConfigBackupSection()
             SuperkeySettingsSection()
@@ -403,19 +408,6 @@ private fun DeveloperSettingsSection() {
             onCheckedChange = { value ->
                 scope.launch(Dispatchers.IO) { setDebugLoggingEnabled(value) }
             },
-        )
-    }
-}
-
-@Composable
-private fun DiagnosticsSettingsSection(onOpen: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-        SettingsSectionHeader(stringResource(R.string.settings_diagnostics_section))
-        PreferenceRow(
-            title = stringResource(R.string.settings_diagnostics_title),
-            subtitle = stringResource(R.string.settings_diagnostics_sub),
-            icon = Icons.Default.CheckCircle,
-            onClick = onOpen,
         )
     }
 }
@@ -1192,7 +1184,7 @@ private fun writeRemoveUnavailableConfiguredApps(
 // Settings headers are the non-bold, indented variant; delegate to the shared
 // component so the Text rendering isn't duplicated per screen.
 @Composable
-private fun SettingsSectionHeader(text: String) {
+internal fun SettingsSectionHeader(text: String) {
     SectionHeader(
         text = text,
         bold = false,
