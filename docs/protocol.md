@@ -452,7 +452,7 @@ the only writer of all profiles; each backend reads its own.
 | Channel | config records it acts on | emits stats? | emits status? |
 |---|---|---|---|
 | `.ko` / KPM | `debug`, `target` (kernel-owned mask bits) | yes | yes (§4.3) |
-| Zygisk | `debug`, `target` (zygisk-owned mask bits) | no, not yet (§7) | yes, via the app heartbeat |
+| Zygisk | `debug`, `target` (zygisk-owned mask bits), `prefix` (global rules, applied inside hooked processes only) | no, not yet (§7) | yes, via the app heartbeat |
 | LSPosed | `debug`, `target` (lsposed-owned mask bits, incl. package visibility) | yes | yes |
 
 A backend ignores `target` mask bits it does not own (`mask & own_hooks`), so the

@@ -127,12 +127,12 @@ SELinux/zygisk territory by design, not bugs. Full hiding matrix in
 |---|---|---|---|
 | `ioctl_flags`, `ioctl_mtu` | `SIOCGIF*` by name | `dev_ioctl` | ENODEV for tun0 |
 | `ioctl_conf` | `SIOCGIFCONF` | `sock_ioctl` | tun0 absent from ifconf |
-| `getifaddrs`, `netlink_getlink` | RTM_GETLINK / getifaddrs | `rtnl_fill_ifinfo`, `inet*_fill_ifaddr` | |
-| `netlink_getroute` | RTM_GETROUTE v4/v6 | `fib_dump_info`, `rt6_fill_node` | v6: kernel backends also hide global prefix-rule destinations, uid-gated |
+| `getifaddrs`, `netlink_getlink` | RTM_GETLINK / getifaddrs | `rtnl_fill_ifinfo`, `inet*_fill_ifaddr` | v6 addrs (getifaddrs/RTM_GETADDR): kernel backends also hide global prefix-rule addresses, uid-gated; Zygisk: same inside hooked target processes |
+| `netlink_getroute` | RTM_GETROUTE v4/v6 | `fib_dump_info`, `rt6_fill_node` | v6: kernel backends also hide global prefix-rule destinations, uid-gated; Zygisk: same inside hooked target processes |
 | `netlink_getrule` | RTM_GETRULE policy rules | `fib_nl_fill_rule` | v4+v6; kernel-only vector |
 | `proc_route` | `/proc/net/route` | `fib_route_seq_show` | main table — empty for split-tunnel VPN |
-| `proc_ipv6_route` | `/proc/net/ipv6_route` | `ipv6_route_seq_show` | kernel backends: VPN-iface lines + global prefix-rule destinations, uid-gated |
-| `proc_if_inet6` | `/proc/net/if_inet6` | `if6_seq_show` (`.ko` only — KPM has none) | `.ko`: VPN-iface lines + global prefix rules, uid-gated; otherwise zygisk `openat` or SELinux |
+| `proc_ipv6_route` | `/proc/net/ipv6_route` | `ipv6_route_seq_show` | kernel backends: VPN-iface lines + global prefix-rule destinations, uid-gated; Zygisk: same inside hooked target processes |
+| `proc_if_inet6` | `/proc/net/if_inet6` | `if6_seq_show` (`.ko` only — KPM has none) | `.ko`: VPN-iface lines + global prefix rules, uid-gated; otherwise zygisk `openat` (VPN-iface lines + global prefix rules inside hooked processes) or SELinux |
 | `proc_dev` | `/proc/net/dev` | **(none)** | zygisk `openat` or SELinux only |
 | `sys_class_net` | `/sys/class/net` | **(none)** | SELinux only |
 

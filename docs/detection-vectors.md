@@ -112,13 +112,13 @@ Legend: ✅ covered · ⚠️ partial / conditional · — not applicable to tha
 
 | Vector | How it manifests | kmod | KPM | Zygisk | lsposed | SELinux |
 |---|---|:--:|:--:|:--:|:--:|:--:|
-| `getifaddrs()` | native list of ifaces+addrs | ✅ via netlink hooks | ✅ via netlink hooks | ✅ unlinks VPN nodes | — | |
+| `getifaddrs()` | native list of ifaces+addrs | ✅ via netlink hooks | ✅ via netlink hooks | ✅ unlinks VPN nodes (+ v6 prefix rules) | — | |
 | `NetworkInterface.getNetworkInterfaces()` (Java) | JNI → `getifaddrs` | ✅ | ✅ | ✅ | — | |
 | `ioctl(SIOCGIFNAME)` index→name | native | ✅ `dev_ioctl` | ✅ `dev_ioctl` | ✅ | — | |
 | `ioctl(SIOCGIFCONF)` enumerate | native | ✅ `sock_ioctl` | ✅ `sock_ioctl` | ✅ `filter_ifconf` | — | |
 | `ioctl(SIOCGIF{FLAGS,MTU,INDEX,HWADDR,ADDR})` by name | native | ✅ `dev_ioctl` | ✅ `dev_ioctl` | ✅ pre-screen | — | |
 | netlink `RTM_GETLINK` dump | `recvmsg`/`recvfrom` of `RTM_NEWLINK` | ✅ `rtnl_fill_ifinfo` | ✅ `rtnl_fill_ifinfo` | ✅ filter by index | — | |
-| netlink `RTM_GETADDR` dump | `RTM_NEWADDR` | ✅ `inet*_fill_ifaddr` | ✅ `inet*_fill_ifaddr` | ✅ filter by index | — | |
+| netlink `RTM_GETADDR` dump | `RTM_NEWADDR` | ✅ `inet*_fill_ifaddr` | ✅ `inet*_fill_ifaddr` | ✅ filter by index (+ v6 prefix rules) | — | |
 | `/sys/class/net/<iface>/*` | reads iface type/mtu/operstate | — | — | — | — | 🔒 usually denied |
 
 Notes: bionic's `getifaddrs` itself runs over netlink, so the kernel-backend
@@ -158,8 +158,8 @@ items.
 | Vector | How it manifests | kmod | KPM | Zygisk | lsposed | SELinux |
 |---|---|:--:|:--:|:--:|:--:|:--:|
 | `/proc/net/route` (IPv4) | text, iface in col 1 | ✅ `fib_route_seq_show` | ✅ `fib_route_seq_show` | ✅ `filter_route_buf` | — | 🔒 often denied |
-| `/proc/net/ipv6_route` | text, iface last field | ✅ `ipv6_route_seq_show` (+ prefix-rule destinations) | ✅ `ipv6_route_seq_show` (+ prefix-rule destinations) | ✅ | — | 🔒 |
-| netlink `RTM_GETROUTE` **dump** | `RTA_OIF` index per route | ✅ `fib_dump_info` / `rt6_fill_node` (+ prefix-rule destinations, v6) | ✅ `fib_dump_info` / `rt6_fill_node` (+ prefix-rule destinations, v6) | ✅ `RTM_NEWROUTE` filter (issue #86) | — | |
+| `/proc/net/ipv6_route` | text, iface last field | ✅ `ipv6_route_seq_show` (+ prefix-rule destinations) | ✅ `ipv6_route_seq_show` (+ prefix-rule destinations) | ✅ (+ prefix-rule destinations) | — | 🔒 |
+| netlink `RTM_GETROUTE` **dump** | `RTA_OIF` index per route | ✅ `fib_dump_info` / `rt6_fill_node` (+ prefix-rule destinations, v6) | ✅ `fib_dump_info` / `rt6_fill_node` (+ prefix-rule destinations, v6) | ✅ `RTM_NEWROUTE` filter (issue #86) (+ prefix-rule destinations, v6) | — | |
 | netlink `RTM_GETROUTE` **single** (`ip route get`) | one `rt_fill_info` reply | ⚠️ intentionally unhooked (see ROADMAP) | ⚠️ intentionally unhooked | ⚠️ not filtered | — | |
 | netlink `RTM_GETRULE` (policy rules) | per-UID lookup tables | ✅ `fib_nl_fill_rule` | ✅ `fib_nl_fill_rule` | — | — | |
 | host-route to the VPN **server** | `/32`·`/128` to a public IP via a *physical* iface | ✅ `is_public_host_route_via_physical` | ✅ `kpm_is_public_host_route{4,6}` | — | — | |
@@ -169,7 +169,11 @@ The kernel backends additionally hide v6 route **destinations** covered by a
 global prefix rule — on `/proc/net/ipv6_route` and in `RTM_GETROUTE` v6 dumps —
 under the same reader-uid gate as the address paths (3C). KPM implements the
 same prefix-rule hiding on its hooked paths (v6 addresses and both route paths,
-uid-gated); Zygisk does not implement prefix rules yet.
+uid-gated); Zygisk implements the same prefix-rule hiding inside hooked target
+processes (getifaddrs and RTM_GETADDR v6 addresses, `/proc/net/if_inet6` and
+`/proc/net/ipv6_route` lines via openat, RTM_GETROUTE v6 dump destinations);
+the reader-uid gate is structural there — only target apps (uid >= 10000) are
+ever specialized with hooks.
 
 The **`if<N>` leak (issue #86)** lived here: a hidden tun still has an index, and
 a route dump exposes that index even when the *name* is hidden, so the detector
@@ -195,7 +199,7 @@ cheap and correct when such a route is present; see issue discussion.
 |---|---|:--:|:--:|:--:|:--:|:--:|
 | `/proc/net/tcp` | local addr hex per socket | — | — | ✅ `filter_tcp4_buf` (by VPN addr) | — | 🔒 often denied |
 | `/proc/net/tcp6` | 32-hex local addr | — | — | ✅ `filter_tcp6_buf` | — | 🔒 |
-| `/proc/net/if_inet6` | IPv6 addrs, iface last field | ✅ `if6_seq_show` | — | ✅ `filter_if_inet6_buf` | — | 🔒 |
+| `/proc/net/if_inet6` | IPv6 addrs, iface last field | ✅ `if6_seq_show` | — | ✅ `filter_if_inet6_buf` (+ prefix rules) | — | 🔒 |
 
 `/proc/net/if_inet6` is now covered by the `.ko` via `if6_seq_show` (hook 25),
 with the same hiding semantics as the netlink path (VPN ifname rules + prefix
