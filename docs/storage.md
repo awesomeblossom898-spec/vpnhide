@@ -153,8 +153,8 @@ ASCII with no spaces, `prefix` must parse as IPv6, `prefixLen` present and
 <= 128 — and any violation rejects the whole config write; the LSPosed app
 parses best-effort, skipping malformed entries on read and carrying valid ones
 through config rewrites. The activator emits the derived `prefix` records
-(protocol.md §4.3) for all native backends: the `.ko` acts on them, KPM/Zygisk
-parse-ignore. Like the wire record, prefix hiding is gated by reader uid — it
+(protocol.md §4.3) for all native backends: the `.ko`, KPM, and Zygisk act
+on them. Like the wire record, prefix hiding is gated by reader uid — it
 applies only to apps (uid >= 10000, isolated uids included) and the adb shell
 (uid 2000), never to system readers, because hiding the device's own v6
 addresses from networkstack wedges IpClient provisioning and mobile data never

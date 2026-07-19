@@ -809,7 +809,7 @@ fn collect_vpn_addrs() -> (
 }
 
 // ============================================================================
-//  Hook: recvmsg — filter netlink RTM_NEWADDR / RTM_NEWLINK responses
+//  Hook: recvmsg — filter netlink RTM_NEWADDR / RTM_NEWLINK / RTM_NEWROUTE responses
 // ============================================================================
 
 saved_original! {
@@ -823,7 +823,8 @@ saved_original! {
 /// Replacement for `libc::recvmsg`.
 ///
 /// After the real recvmsg returns, checks if the response looks like a
-/// netlink dump containing `RTM_NEWADDR` or `RTM_NEWLINK` messages. If
+/// netlink dump containing `RTM_NEWADDR`, `RTM_NEWLINK` or `RTM_NEWROUTE`
+/// messages. If
 /// so, collects VPN interface indices and removes matching entries from
 /// the buffer before returning to the caller.
 ///

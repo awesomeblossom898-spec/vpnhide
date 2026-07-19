@@ -329,7 +329,7 @@ fn parse_hex_addr6(hex: &[u8]) -> Option<[u32; 4]> {
 }
 
 // ============================================================================
-//  Netlink RTM_NEWADDR / RTM_NEWLINK filter
+//  Netlink RTM_NEWADDR / RTM_NEWLINK / RTM_NEWROUTE filter
 // ============================================================================
 
 const NLMSG_ALIGNTO: usize = 4;
@@ -1224,6 +1224,17 @@ tun0:  300    3    0    0\n"
         // Patch the RTA_DST rta_len down to 12 (4 header + 8 payload < 16-byte addr).
         let rta_dst_len_off = NLMSG_HDRLEN + RTMSG_HDRLEN + 8;
         msg[rta_dst_len_off..rta_dst_len_off + 2].copy_from_slice(&(12u16).to_ne_bytes());
+        let len = msg.len();
+        let prules = [prule(5, PFX_RMNET1, 32)];
+        assert_eq!(filter_netlink_dump_ex(&mut msg, &[], &prules), len);
+    }
+
+    #[test]
+    fn newroute6_ipv4_never_filtered() {
+        // Same bytes but rtm_family = AF_INET (2): the hard-constraint gate.
+        let covered = [0x24, 0x09, 0x40, 0xe3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut msg = make_newroute6(5, Some(covered));
+        msg[NLMSG_HDRLEN] = 2; // rtm_family = AF_INET
         let len = msg.len();
         let prules = [prule(5, PFX_RMNET1, 32)];
         assert_eq!(filter_netlink_dump_ex(&mut msg, &[], &prules), len);
