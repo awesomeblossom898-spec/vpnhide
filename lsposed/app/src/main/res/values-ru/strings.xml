@@ -465,7 +465,7 @@
     <string name="prefix_rule_prefix">Префикс (IPv6)</string>
     <string name="prefix_rule_prefix_len">Длина префикса</string>
     <string name="prefix_rule_add">Добавить правило</string>
-    <string name="prefix_rule_remove">Удалить правило</string>
+    <string name="prefix_rule_remove_n">Удалить правило %1$d</string>
     <string name="prefix_rules_empty">Нет правил — все адреса IPv6 видны.</string>
     <string name="prefix_rules_saved">Правила префиксов сохранены.</string>
     <string name="prefix_rules_failed">Не удалось сохранить правила префиксов.</string>

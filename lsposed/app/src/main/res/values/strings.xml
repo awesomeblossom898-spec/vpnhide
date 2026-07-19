@@ -494,7 +494,7 @@
     <string name="prefix_rule_prefix">Prefix (IPv6)</string>
     <string name="prefix_rule_prefix_len">Prefix length</string>
     <string name="prefix_rule_add">Add rule</string>
-    <string name="prefix_rule_remove">Remove rule</string>
+    <string name="prefix_rule_remove_n">Remove rule %1$d</string>
     <string name="prefix_rules_empty">No prefix rules — every IPv6 address is visible.</string>
     <string name="prefix_rules_saved">Prefix rules saved.</string>
     <string name="prefix_rules_failed">Failed to save prefix rules.</string>

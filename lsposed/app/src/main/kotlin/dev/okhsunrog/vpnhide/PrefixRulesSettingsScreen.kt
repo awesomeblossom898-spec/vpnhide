@@ -63,6 +63,7 @@ internal fun PrefixRulesSettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val targets by TargetsCache.snapshot.collectAsState()
+    val targetsError by TargetsCache.error.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
     var saving by remember { mutableStateOf(false) }
     var attemptedSave by remember { mutableStateOf(false) }
@@ -135,11 +136,21 @@ internal fun PrefixRulesSettingsScreen(onBack: () -> Unit) {
         snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         if (canonical == null) {
-            Box(
-                modifier = Modifier.fillMaxSize().padding(padding),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator()
+            if (targetsError != null) {
+                // A failed load (e.g. root died mid-session) leaves the cache with an
+                // error but no value — without this branch the user would be stranded
+                // on the spinner below with no way to retry (mirrors TargetPickerScreen).
+                TargetsLoadErrorCard(
+                    onRetry = { TargetsCache.refresh(scope, context) },
+                    modifier = Modifier.padding(padding),
+                )
+            } else {
+                Box(
+                    modifier = Modifier.fillMaxSize().padding(padding),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator()
+                }
             }
             return@Scaffold
         }
@@ -242,7 +253,7 @@ private fun PrefixRuleCard(
                 )
             }
             IconButton(onClick = onRemove) {
-                Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.prefix_rule_remove))
+                Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.prefix_rule_remove_n, index + 1))
             }
         }
     }
