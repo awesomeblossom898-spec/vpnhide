@@ -1188,6 +1188,22 @@ pub unsafe extern "C" fn hooked_recvfrom_chk(
 /// `collect_vpn_iface_indices`. Resolved per call, never cached: bearers
 /// renumber (rmnet_dataN churn) and a stale index would filter the wrong
 /// iface. Empty rules resolve to an empty array without a single syscall.
+///
+/// Rules whose `if_nametoindex` returns 0 get one retry via our own
+/// `RTM_GETADDR` dump (name-joined with a `getifaddrs` snapshot, then
+/// bound by unique prefix — see `resolve_pending_via_netlink`) before
+/// being declared inert: without the INTERNET permission the libc path
+/// dies (`/sys/class/net` reads are SELinux-denied for untrusted_app, the
+/// `socket(AF_INET)` fallback is EPERM without the inet gid, and even
+/// `if_nameindex()` fails — it enumerates `/sys`), which silently zeroed
+/// EVERY rule and turned the whole netlink prefix filter off for such
+/// apps. A NETLINK_ROUTE `RTM_GETADDR` dump needs no permission — same
+/// reason `getifaddrs` keeps working there. (`RTM_GETLINK` would carry the
+/// names directly, but SELinux denies `nlmsg_write` for it in exactly the
+/// domains that need this fallback: the send fails EACCES regardless of
+/// socket type, send syscall or payload shape — verified on-device.)
+/// Rules still at index 0 after the retry are dropped (iface
+/// down/renumbered right now — rule inert this dump).
 fn resolve_prefix_rules() -> (
     [crate::filter::IndexedPrefixRule; crate::filter::MAX_PREFIX_RULES],
     usize,
@@ -1200,12 +1216,16 @@ fn resolve_prefix_rules() -> (
         prefix_len: 0,
     }; MAX_PREFIX_RULES];
     let mut n = 0usize;
+    // (out slot, rules index) pairs that failed the fast path, awaiting the
+    // if_nameindex retry below.
+    let mut pending = [(0usize, 0usize); MAX_PREFIX_RULES];
+    let mut pending_n = 0usize;
 
     let rules = crate::prefix_rules();
     if rules.is_empty() {
         return (out, 0);
     }
-    for rule in rules.iter().take(MAX_PREFIX_RULES) {
+    for (rule_idx, rule) in rules.iter().take(MAX_PREFIX_RULES).enumerate() {
         let Ok(cname) = std::ffi::CString::new(rule.ifname.as_str()) else {
             continue;
         };
@@ -1216,17 +1236,272 @@ fn resolve_prefix_rules() -> (
             f.set(prev);
             i
         });
-        if idx == 0 {
-            continue; // iface down/renumbered right now — rule inert this dump
-        }
         out[n] = IndexedPrefixRule {
             index: idx,
             addr: rule.addr,
             prefix_len: rule.prefix_len,
         };
+        if idx == 0 {
+            pending[pending_n] = (n, rule_idx);
+            pending_n += 1;
+        }
         n += 1;
     }
-    (out, n)
+
+    if pending_n > 0 {
+        resolve_pending_via_netlink(&mut out[..n], &pending[..pending_n], rules);
+    }
+
+    // Compact away rules that stayed unresolved (index 0 = inert this dump).
+    let mut m = 0usize;
+    for i in 0..n {
+        if out[i].index != 0 {
+            out[m] = out[i];
+            m += 1;
+        }
+    }
+    (out, m)
+}
+
+/// `NLM_F_REQUEST | NLM_F_DUMP` for the resolver's `RTM_GETADDR` request
+/// (libc doesn't re-export the combined flag for Android).
+const NLM_F_REQUEST_DUMP: u16 = 0x301;
+const NLMSG_DONE: u16 = 3;
+const NLMSG_ERROR: u16 = 2;
+
+/// Capacity of the `getifaddrs` snapshot used by the resolver fallback.
+/// 64 covers even pathological iface counts; excess entries are dropped
+/// and rules that needed the dropped names simply stay inert this dump.
+const MAX_IFADDR_PAIRS: usize = 64;
+
+/// One (ifname, family, address) triple from the real `getifaddrs`.
+#[derive(Clone, Copy, Default)]
+struct IfAddrPair {
+    /// Interface name without NUL (IFNAMSIZ = 16 caps it at 15 + NUL).
+    name: [u8; 16],
+    name_len: u8,
+    /// `AF_INET` / `AF_INET6`, matching `ifaddrmsg.ifa_family`.
+    family: u8,
+    /// 4 significant bytes for AF_INET, 16 for AF_INET6, zero-padded.
+    addr: [u8; 16],
+}
+
+/// Snapshot (ifname, family, address) triples from the REAL `getifaddrs`,
+/// all interfaces (no VPN-name filtering). This is the name source for the
+/// resolver fallback: in app domains without the INTERNET permission every
+/// libc name→index path is denied and our own `RTM_GETLINK` dump is
+/// SELinux-EACCES, but `getifaddrs` works (its address dump uses the
+/// SELinux-allowed `RTM_GETADDR`). Sets/restores the IN_GETIFADDRS guard
+/// itself so bionic's internal ioctls and recvs pass through our hooks.
+unsafe fn snapshot_ifaddr_pairs() -> ([IfAddrPair; MAX_IFADDR_PAIRS], usize) {
+    let mut pairs: [IfAddrPair; MAX_IFADDR_PAIRS] = core::array::from_fn(|_| IfAddrPair::default());
+    let mut n = 0usize;
+
+    let Some(real) = real_getifaddrs() else {
+        return (pairs, 0);
+    };
+    let mut ifap: *mut libc::ifaddrs = core::ptr::null_mut();
+    let rc = IN_GETIFADDRS.with(|f| {
+        let prev = f.get();
+        f.set(true);
+        let rc = unsafe { real(&mut ifap) };
+        f.set(prev);
+        rc
+    });
+    if rc != 0 || ifap.is_null() {
+        // Defensive: a failed getifaddrs should leave *out null, but free a
+        // partial list if this bionic ever hands one back anyway.
+        if !ifap.is_null() {
+            unsafe { libc::freeifaddrs(ifap) };
+        }
+        return (pairs, 0);
+    }
+
+    let mut cur = ifap;
+    while !cur.is_null() && n < MAX_IFADDR_PAIRS {
+        let entry = unsafe { &*cur };
+        cur = entry.ifa_next;
+        if entry.ifa_name.is_null() || entry.ifa_addr.is_null() {
+            continue;
+        }
+        let name = unsafe { core::ffi::CStr::from_ptr(entry.ifa_name) }.to_bytes();
+        if name.is_empty() || name.len() > 15 {
+            continue;
+        }
+        let family = unsafe { (*entry.ifa_addr).sa_family } as c_int;
+        let mut pair = IfAddrPair::default();
+        if family == libc::AF_INET {
+            let sin = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in) };
+            pair.addr[..4].copy_from_slice(&sin.sin_addr.s_addr.to_ne_bytes());
+            pair.family = libc::AF_INET as u8;
+        } else if family == libc::AF_INET6 {
+            let sin6 = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in6) };
+            pair.addr = sin6.sin6_addr.s6_addr;
+            pair.family = libc::AF_INET6 as u8;
+        } else {
+            continue;
+        }
+        pair.name[..name.len()].copy_from_slice(name);
+        pair.name_len = name.len() as u8;
+        pairs[n] = pair;
+        n += 1;
+    }
+
+    unsafe { libc::freeifaddrs(ifap) };
+    (pairs, n)
+}
+
+/// Slow-path name→index resolution for apps where every libc name→index
+/// path is permission-denied (no INTERNET permission). Issues one
+/// `RTM_GETADDR` dump on our own NETLINK_ROUTE socket and resolves pending
+/// rules in two stages:
+///
+/// 1. **Name join** — match each `RTM_NEWADDR`'s (index, address) against
+///    a `getifaddrs` name snapshot; IPv6 `RTM_NEWADDR` messages carry no
+///    interface name (`IFA_LABEL` is IPv4-only), so the address bytes are
+///    the join key.
+/// 2. **Unique-prefix binding** — bionic's `getifaddrs` omits
+///    tentative/deprecated addresses (verified on-device: the raw dump
+///    lists them, `getifaddrs` doesn't), so stage 1 goes blind exactly
+///    during bearer churn (rmnet_dataN renumbering). A still-unresolved
+///    rule whose prefix covers a dumped IPv6 address therefore binds to
+///    that address's index — but only when ONE index carries addresses in
+///    that prefix; two different indices poison the binding (the prefix is
+///    genuinely shared and a blind guess could filter the wrong iface).
+///    This is broader than strict name binding by design: the configured
+///    prefix is expected to be unique to its iface in practice.
+///
+/// Both channels are SELinux-clean in exactly the domains that need this
+/// fallback (`RTM_GETLINK` is not: its send fails EACCES there).
+///
+/// The whole exchange runs under the IN_GETIFADDRS guard: our own recv
+/// calls pass through the recv-family hooks unfiltered and, critically,
+/// cannot re-enter `resolve_prefix_rules` recursively. Patches
+/// `out[slot].index` in place; slots that match nothing keep index 0 and
+/// are compacted out by the caller.
+fn resolve_pending_via_netlink(
+    out: &mut [crate::filter::IndexedPrefixRule],
+    pending: &[(usize, usize)],
+    rules: &[crate::protocol::PrefixRule],
+) {
+    let (pairs, pairs_n) = unsafe { snapshot_ifaddr_pairs() };
+
+    let fd = unsafe {
+        libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+            libc::NETLINK_ROUTE,
+        )
+    };
+    if fd < 0 {
+        return;
+    }
+
+    // Stage-2 state, one slot per pending entry: 0 = no candidate yet,
+    // u32::MAX = poisoned (two different indices carry addresses inside
+    // the rule's prefix — genuinely shared, don't guess), anything else
+    // is the unique index that prefix binds to.
+    let mut prefix_bind = [0u32; crate::filter::MAX_PREFIX_RULES];
+
+    // nlmsghdr + rtgenmsg with rtgen_family = AF_UNSPEC (all address
+    // families; bionic's getifaddrs uses the same request shape).
+    let mut req = [0u8; 16 + 4];
+    let req_len = req.len() as u32;
+    req[0..4].copy_from_slice(&req_len.to_ne_bytes());
+    req[4..6].copy_from_slice(&crate::filter::RTM_GETADDR.to_ne_bytes());
+    req[6..8].copy_from_slice(&NLM_F_REQUEST_DUMP.to_ne_bytes());
+
+    IN_GETIFADDRS.with(|f| {
+        let prev = f.get();
+        f.set(true);
+        let sent = unsafe { libc::send(fd, req.as_ptr().cast::<c_void>(), req.len(), 0) };
+        if sent == req.len() as isize {
+            let mut buf = [0u8; 8192];
+            'recv: for _ in 0..64 {
+                let n = unsafe { libc::recv(fd, buf.as_mut_ptr().cast::<c_void>(), buf.len(), 0) };
+                if n < 0 {
+                    if unsafe { *__errno() } == libc::EINTR {
+                        continue;
+                    }
+                    break;
+                }
+                if n == 0 {
+                    break;
+                }
+                let mut off = 0usize;
+                let len = n as usize;
+                while off + 16 <= len {
+                    let nlmsg_len =
+                        u32::from_ne_bytes(buf[off..off + 4].try_into().unwrap_or([0; 4])) as usize;
+                    if nlmsg_len < 16 || off + nlmsg_len > len {
+                        break 'recv;
+                    }
+                    let nlmsg_type =
+                        u16::from_ne_bytes(buf[off + 4..off + 6].try_into().unwrap_or([0; 2]));
+                    if nlmsg_type == NLMSG_DONE || nlmsg_type == NLMSG_ERROR {
+                        break 'recv;
+                    }
+                    if nlmsg_type == crate::filter::RTM_NEWADDR
+                        && let Some((index, family, address, local)) =
+                            crate::filter::newaddr_index_addrs(&buf[off..off + nlmsg_len])
+                    {
+                        for candidate in [Some(address), local].into_iter().flatten() {
+                            if candidate == [0u8; 16] {
+                                continue;
+                            }
+                            // Stage 1: name join against the snapshot.
+                            if let Some(name) = pairs[..pairs_n].iter().find_map(|p| {
+                                (p.family == family && p.addr == candidate)
+                                    .then(|| &p.name[..p.name_len as usize])
+                            }) {
+                                for &(slot, rule_idx) in pending {
+                                    if out[slot].index == 0
+                                        && name == rules[rule_idx].ifname.as_bytes()
+                                    {
+                                        out[slot].index = index;
+                                    }
+                                }
+                            }
+                            // Stage 2: unique-prefix binding for rules the
+                            // snapshot couldn't name (tentative/deprecated
+                            // addrs are invisible to getifaddrs).
+                            if family == libc::AF_INET6 as u8 {
+                                for (i, &(slot, rule_idx)) in pending.iter().enumerate() {
+                                    if out[slot].index != 0 {
+                                        continue;
+                                    }
+                                    let r = &rules[rule_idx];
+                                    if !crate::filter::prefix_match(
+                                        &candidate,
+                                        &r.addr,
+                                        r.prefix_len,
+                                    ) {
+                                        continue;
+                                    }
+                                    if prefix_bind[i] == 0 {
+                                        prefix_bind[i] = index;
+                                    } else if prefix_bind[i] != index {
+                                        prefix_bind[i] = u32::MAX;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    off += (nlmsg_len + 3) & !3;
+                }
+            }
+        }
+        f.set(prev);
+    });
+
+    // Apply stage-2 bindings: only unambiguous, still-unresolved entries.
+    for (i, &(slot, _)) in pending.iter().enumerate() {
+        if out[slot].index == 0 && prefix_bind[i] != 0 && prefix_bind[i] != u32::MAX {
+            out[slot].index = prefix_bind[i];
+        }
+    }
+
+    unsafe { libc::close(fd) };
 }
 
 /// Collect interface indices of VPN interfaces. Uses real_getifaddrs

@@ -337,6 +337,18 @@ const NLMSG_HDRLEN: usize = 16; // sizeof(struct nlmsghdr), already aligned
 pub(crate) const RTM_NEWLINK: u16 = 16;
 pub(crate) const RTM_NEWADDR: u16 = 20;
 pub(crate) const RTM_NEWROUTE: u16 = 24;
+/// `RTM_GETADDR` — the dump request the hook layer issues on its own
+/// NETLINK_ROUTE socket to resolve rule ifnames when `if_nametoindex` is
+/// unavailable (apps without the INTERNET permission). This must NOT be
+/// `RTM_GETLINK`: SELinux denies `nlmsg_write` for `RTM_GETLINK` to app
+/// domains without INTERNET (the send fails EACCES — verified on-device
+/// across socket types, send syscalls and payload shapes), while
+/// `RTM_GETADDR` is allowed, which is also why `getifaddrs` keeps working
+/// there.
+pub(crate) const RTM_GETADDR: u16 = 22;
+/// `sizeof(struct ifaddrmsg)` — the fixed header preceding the rtattr TLVs
+/// in an `RTM_NEWADDR` payload (family, prefixlen, flags, scope, index).
+const IFADDRMSG_HDRLEN: usize = 8;
 
 /// `sizeof(struct rtmsg)` — the fixed header that precedes the rtattr TLVs
 /// in an `RTM_NEWROUTE` payload (family, dst_len, src_len, tos, table,
@@ -501,11 +513,59 @@ fn route_oif(msg: &[u8]) -> Option<u32> {
     None
 }
 
+/// Parsed view of one `RTM_NEWADDR` message: `(ifa_index, ifa_family,
+/// IFA_ADDRESS, IFA_LOCAL)`. Factored out of `newaddr_index_addrs`'s
+/// signature for readability (and clippy's type-complexity limit).
+pub(crate) type NewaddrInfo = (u32, u8, [u8; 16], Option<[u8; 16]>);
+
+/// Extract `(ifa_index, ifa_family, IFA_ADDRESS, IFA_LOCAL)` from one
+/// `RTM_NEWADDR` message (the whole message, starting at the `nlmsghdr`).
+/// The interface index is at offset 4 within `struct ifaddrmsg`; addresses
+/// are the `IFA_ADDRESS` / `IFA_LOCAL` rtattr payloads (4 bytes for AF_INET,
+/// 16 for AF_INET6), zero-padded into a fixed 16-byte slot. `IFA_LOCAL` is
+/// absent on most interfaces (present only when a peer address exists), so
+/// it comes back as `None`. Used by the hook layer's own `RTM_GETADDR` dump
+/// when `if_nametoindex` is unavailable: the dump carries no interface
+/// names for IPv6 (no `IFA_LABEL` there), so the caller joins these
+/// addresses against a `getifaddrs` snapshot instead. Returns `None` on any
+/// truncation or when the message carries no `IFA_ADDRESS`.
+pub(crate) fn newaddr_index_addrs(msg: &[u8]) -> Option<NewaddrInfo> {
+    if msg.len() < NLMSG_HDRLEN + IFADDRMSG_HDRLEN {
+        return None;
+    }
+    let family = msg[NLMSG_HDRLEN];
+    let index = read_u32_ne(msg, NLMSG_HDRLEN + 4)?;
+    let payload = &msg[NLMSG_HDRLEN..];
+    let mut address: Option<[u8; 16]> = None;
+    let mut local: Option<[u8; 16]> = None;
+    let mut pos = IFADDRMSG_HDRLEN;
+    while pos + 4 <= payload.len() {
+        let rta_len = read_u16_ne(payload, pos)? as usize;
+        let rta_type = read_u16_ne(payload, pos + 2)?;
+        if rta_len < 4 || pos + rta_len > payload.len() {
+            break;
+        }
+        if rta_type == IFA_ADDRESS || rta_type == IFA_LOCAL {
+            let raw = &payload[pos + 4..pos + rta_len];
+            if raw.len() <= 16 {
+                let mut slot = [0u8; 16];
+                slot[..raw.len()].copy_from_slice(raw);
+                if rta_type == IFA_ADDRESS {
+                    address = Some(slot);
+                } else {
+                    local = Some(slot);
+                }
+            }
+        }
+        pos += rta_align(rta_len);
+    }
+    address.map(|addr| (index, family, addr, local))
+}
+
 fn read_u32_ne(data: &[u8], off: usize) -> Option<u32> {
     let bytes: &[u8; 4] = data.get(off..off + 4)?.try_into().ok()?;
     Some(u32::from_ne_bytes(*bytes))
 }
-
 fn read_u16_ne(data: &[u8], off: usize) -> Option<u16> {
     let bytes: &[u8; 2] = data.get(off..off + 2)?.try_into().ok()?;
     Some(u16::from_ne_bytes(*bytes))
@@ -682,6 +742,86 @@ tun0:  300    3    0    0\n"
     fn empty_name_is_not_vpn() {
         assert!(!is_vpn_iface_bytes(b""));
         assert!(!is_vpn_iface_bytes(&[0u8; 16]));
+    }
+
+    /// Build one `RTM_NEWADDR` message: nlmsghdr + ifaddrmsg with
+    /// `ifa_family`/`ifa_index`, then an `IFA_ADDRESS` rtattr and an
+    /// optional `IFA_LOCAL` rtattr carrying the raw address bytes.
+    fn make_newaddr_msg(index: u32, family: u8, address: &[u8], local: Option<&[u8]>) -> Vec<u8> {
+        let addr_rta = 4 + address.len();
+        let local_rta = local.map_or(0, |l| 4 + l.len());
+        let nlmsg_len =
+            NLMSG_HDRLEN + IFADDRMSG_HDRLEN + rta_align(addr_rta) + rta_align(local_rta);
+        let mut msg = vec![0u8; nlmsg_len];
+        msg[0..4].copy_from_slice(&(nlmsg_len as u32).to_ne_bytes());
+        msg[4..6].copy_from_slice(&RTM_NEWADDR.to_ne_bytes());
+        msg[NLMSG_HDRLEN] = family;
+        msg[NLMSG_HDRLEN + 4..NLMSG_HDRLEN + 8].copy_from_slice(&index.to_ne_bytes());
+        let attr_off = NLMSG_HDRLEN + IFADDRMSG_HDRLEN;
+        msg[attr_off..attr_off + 2].copy_from_slice(&(addr_rta as u16).to_ne_bytes());
+        msg[attr_off + 2..attr_off + 4].copy_from_slice(&IFA_ADDRESS.to_ne_bytes());
+        msg[attr_off + 4..attr_off + 4 + address.len()].copy_from_slice(address);
+        if let Some(l) = local {
+            let off2 = attr_off + rta_align(addr_rta);
+            msg[off2..off2 + 2].copy_from_slice(&(local_rta as u16).to_ne_bytes());
+            msg[off2 + 2..off2 + 4].copy_from_slice(&IFA_LOCAL.to_ne_bytes());
+            msg[off2 + 4..off2 + 4 + l.len()].copy_from_slice(l);
+        }
+        msg
+    }
+
+    /// Zero-pad an address into the fixed 16-byte comparison slot the
+    /// parser returns.
+    fn pad16(addr: &[u8]) -> [u8; 16] {
+        let mut slot = [0u8; 16];
+        slot[..addr.len()].copy_from_slice(addr);
+        slot
+    }
+
+    #[test]
+    fn newaddr_index_addrs_parses_v6() {
+        let v6 = [
+            0x24, 0x09, 0x40, 0xe3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+        ];
+        let msg = make_newaddr_msg(22, AF_INET6, &v6, None);
+        assert_eq!(
+            newaddr_index_addrs(&msg),
+            Some((22, AF_INET6, pad16(&v6), None))
+        );
+    }
+
+    #[test]
+    fn newaddr_index_addrs_parses_v4_with_local() {
+        // Point-to-point style: IFA_ADDRESS = peer, IFA_LOCAL = own.
+        let msg = make_newaddr_msg(7, 2, &[192, 0, 0, 1], Some(&[192, 0, 0, 2]));
+        assert_eq!(
+            newaddr_index_addrs(&msg),
+            Some((7, 2, pad16(&[192, 0, 0, 1]), Some(pad16(&[192, 0, 0, 2]))))
+        );
+    }
+
+    #[test]
+    fn newaddr_index_addrs_rejects_truncated() {
+        // Shorter than nlmsghdr + ifaddrmsg.
+        assert_eq!(newaddr_index_addrs(&[0u8; 20]), None);
+        // Header fine but rtattr header cut off mid-way.
+        let msg = make_newaddr_msg(7, 2, &[127, 0, 0, 1], None);
+        let cut = NLMSG_HDRLEN + IFADDRMSG_HDRLEN + 2;
+        assert_eq!(newaddr_index_addrs(&msg[..cut]), None);
+        // rtattr claims more than the message holds.
+        let mut bad = make_newaddr_msg(7, 2, &[127, 0, 0, 1], None);
+        let attr_off = NLMSG_HDRLEN + IFADDRMSG_HDRLEN;
+        bad[attr_off..attr_off + 2].copy_from_slice(&0xfff0u16.to_ne_bytes());
+        assert_eq!(newaddr_index_addrs(&bad), None);
+    }
+
+    #[test]
+    fn newaddr_index_addrs_none_without_address_attr() {
+        // A well-formed message whose only rtattr is not IFA_ADDRESS.
+        let mut msg = make_newaddr_msg(9, 2, &[127, 0, 0, 1], None);
+        let attr_off = NLMSG_HDRLEN + IFADDRMSG_HDRLEN;
+        msg[attr_off + 2..attr_off + 4].copy_from_slice(&99u16.to_ne_bytes());
+        assert_eq!(newaddr_index_addrs(&msg), None);
     }
 
     #[test]
