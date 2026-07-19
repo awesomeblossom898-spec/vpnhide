@@ -26,14 +26,14 @@ jobs:
           gcc -O2 -Wall -Wextra -Werror -I.. -o /tmp/test_protocol test_protocol.c
           /tmp/test_protocol protocol_vectors.tsv
 
-      - name: rustfmt (protocol + activator crates)
-        run: cargo fmt --check -p vpnhide_protocol -p vpnhide_protocol_diff -p vpnhide_activator
+      - name: rustfmt (protocol + activator + zygisk crates)
+        run: cargo fmt --check -p vpnhide_protocol -p vpnhide_protocol_diff -p vpnhide_activator -p vpnhide_zygisk
 
       - name: clippy (protocol + activator crates, -D warnings)
         run: cargo clippy -p vpnhide_protocol -p vpnhide_protocol_diff -p vpnhide_activator --all-targets -- -D warnings
 
-      - name: cargo test (protocol + diff oracle + activator)
-        run: cargo test -p vpnhide_protocol -p vpnhide_protocol_diff -p vpnhide_activator
+      - name: cargo test (protocol + diff oracle + activator + zygisk)
+        run: cargo test -p vpnhide_protocol -p vpnhide_protocol_diff -p vpnhide_activator -p vpnhide_zygisk
 
   kotlin:
     runs-on: ubuntu-latest

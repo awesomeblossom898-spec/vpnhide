@@ -106,3 +106,40 @@ jobs:
           name: vpnhide-kpm
           path: vpnhide-kpm.zip
           if-no-files-found: error
+
+  zygisk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive # shadowhook lives under zygisk/third_party
+          fetch-depth: 0 # version stamp's `git describe`
+
+      - name: Mark workspace safe
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Rust target + cargo-ndk + native tools
+        run: |
+          set -euxo pipefail
+          rustup target add aarch64-linux-android
+          cargo install cargo-ndk --locked
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends clang lld make cmake ninja-build
+
+      - name: clippy (zygisk crate, android target, -D warnings)
+        run: |
+          set -euxo pipefail
+          export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+          cargo ndk -t arm64-v8a clippy -p vpnhide_zygisk --tests -- -D warnings
+
+      - name: Build zygisk module zip
+        run: |
+          set -euxo pipefail
+          export ANDROID_NDK_HOME="${ANDROID_NDK_HOME:-$ANDROID_NDK_LATEST_HOME}"
+          cd zygisk && ./build.py
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vpnhide-zygisk
+          path: zygisk/target/vpnhide-zygisk.zip
+          if-no-files-found: error
