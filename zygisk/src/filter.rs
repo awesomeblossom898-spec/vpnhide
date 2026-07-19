@@ -34,8 +34,7 @@ pub fn is_vpn_iface_cstr(name: &CStr) -> bool {
 use vpnhide_protocol::PrefixRule;
 
 /// Backend cap, re-exported so the hook layer sizes its per-call resolve
-/// array without importing the protocol crate separately. Keep in sync with
-/// `MAX_PREFIX_RULES` in kmod/shared/vpnhide_logic.h.
+/// array without importing the protocol crate separately.
 pub const MAX_PREFIX_RULES: usize = vpnhide_protocol::MAX_PREFIX_RULES;
 
 /// Bit-exact parity with C `vpnhide_prefix_match`
@@ -813,5 +812,18 @@ tun0:  300    3    0    0\n"
         );
         assert_eq!(parse_addr32_hex(b"2409"), None); // short
         assert_eq!(parse_addr32_hex(b"zz0940e3000000000000000000000000"), None);
+    }
+
+    #[test]
+    fn max_prefix_rules_matches_wire_cap() {
+        // Wire/parser cap is 8 everywhere (protocol crate, native parsers).
+        assert_eq!(MAX_PREFIX_RULES, 8);
+    }
+
+    #[test]
+    fn prefix_rules_fail_closed_empty_before_on_load() {
+        // No on_load in host tests → the OnceLock is unset → fail-closed
+        // empty rules (no prefix filtering).
+        assert!(crate::prefix_rules().is_empty());
     }
 }
