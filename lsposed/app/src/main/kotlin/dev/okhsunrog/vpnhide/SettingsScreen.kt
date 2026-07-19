@@ -113,7 +113,7 @@ fun SettingsScreen(
         return
     }
     if (prefixRulesOpen) {
-        PrefixRulesSettingsScreen { prefixRulesOpen = false }
+        PrefixRulesSettingsScreen(onBack = { prefixRulesOpen = false })
         return
     }
 
