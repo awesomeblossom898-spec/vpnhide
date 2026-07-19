@@ -980,11 +980,10 @@ private fun AppProbeSubtitle(
 }
 
 @Composable
-private fun appLabel(app: AppProbeStats): String =
-    app.packageNames
-        .takeIf { it.isNotEmpty() }
-        ?.joinToString(", ")
-        ?: stringResource(R.string.statistics_unknown_uid, app.uid)
+private fun appLabel(app: AppProbeStats): String {
+    if (app.uid == SENTINEL_UID) return stringResource(R.string.statistics_global_uid)
+    return app.packageNames.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: stringResource(R.string.statistics_unknown_uid, app.uid)
+}
 
 @Composable
 private fun appSurfacesText(app: AppProbeStats): String {

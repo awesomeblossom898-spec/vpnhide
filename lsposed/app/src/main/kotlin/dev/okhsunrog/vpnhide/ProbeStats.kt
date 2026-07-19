@@ -2,6 +2,10 @@ package dev.okhsunrog.vpnhide
 
 import dev.okhsunrog.vpnhide.generated.HookIds
 
+// Sentinel uid attributing global prefix-filter hits (docs/protocol.md §4.3):
+// never a real app uid — render it as "global", not a numeric fallback.
+internal const val SENTINEL_UID = 0xFFFFFFFFL
+
 // Where a detection method lives — used to group methods on the per-app card and
 // to explain (native syscall/libc vs Java API vs package enumeration) at a
 // glance. "Native" covers both the kernel backends and Zygisk's libc hooks.

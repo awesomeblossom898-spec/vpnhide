@@ -151,6 +151,7 @@
     <string name="statistics_zygisk_native_unavailable">Нативные счётчики недоступны для Zygisk. Счётчики Java и Apps по-прежнему доступны через LSPosed.</string>
     <string name="statistics_kpm_stats_truncated">Счётчиков KPM больше, чем канал управления может вернуть за один снимок. Неполные нативные итоги скрыты; счётчики Java и Apps по-прежнему доступны через LSPosed.</string>
     <string name="statistics_unknown_uid">uid %1$d</string>
+    <string name="statistics_global_uid">Глобально (не одно приложение)</string>
     <string name="statistics_status_ok">ОК</string>
     <string name="statistics_status_partial">Частично</string>
     <string name="statistics_status_error">Ошибка</string>
