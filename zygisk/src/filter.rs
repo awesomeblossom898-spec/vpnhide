@@ -399,16 +399,15 @@ fn newaddr_prefix_hit(msg: &[u8], if_index: u32, prules: &[IndexedPrefixRule]) -
         if rta_len < 4 || pos + rta_len > payload.len() {
             break;
         }
-        if rta_len >= 4 + 16 {
-            if let Some(bytes) = payload
+        if rta_len >= 4 + 16
+            && let Some(bytes) = payload
                 .get(pos + 4..pos + 4 + 16)
-                .and_then(|b| <&[u8; 16]>::try_into(b).ok())
-            {
-                if rta_type == IFA_LOCAL {
-                    local = Some(*bytes);
-                } else if rta_type == IFA_ADDRESS {
-                    address = Some(*bytes);
-                }
+                .and_then(|b| <&[u8; 16]>::try_from(b).ok())
+        {
+            if rta_type == IFA_LOCAL {
+                local = Some(*bytes);
+            } else if rta_type == IFA_ADDRESS {
+                address = Some(*bytes);
             }
         }
         pos += rta_align(rta_len);
@@ -454,10 +453,10 @@ fn newroute_prefix_hit(msg: &[u8], oif: Option<u32>, prules: &[IndexedPrefixRule
             break;
         }
         if rta_type == RTA_DST {
-            if rta_len >= 4 + 16 {
-                if let Some(bytes) = payload.get(pos + 4..pos + 4 + 16) {
-                    dst.copy_from_slice(bytes);
-                }
+            if rta_len >= 4 + 16
+                && let Some(bytes) = payload.get(pos + 4..pos + 4 + 16)
+            {
+                dst.copy_from_slice(bytes);
             }
             break; // a malformed-short RTA_DST keeps dst = :: (no match below /0)
         }
