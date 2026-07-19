@@ -928,4 +928,24 @@ tun0:  300    3    0    0\n"
         assert!(out.contains("rmnet_data3"));
         assert!(!out.contains("rmnet_data1"));
     }
+
+    #[test]
+    fn no_rules_wrappers_match_ex() {
+        // The kept no-rules wrappers are exactly the _ex filters with an
+        // empty rule set (and this keeps them exercised: their only
+        // non-test caller moved to the _ex variants).
+        let inet6 = b"240940e3000000000000000000000001 00000005 40 00 00 rmnet_data1\n";
+        let mut a = inet6.to_vec();
+        let mut b = inet6.to_vec();
+        let na = filter_if_inet6_buf(&mut a);
+        let nb = filter_if_inet6_buf_ex(&mut b, &[]);
+        assert_eq!(&a[..na], &b[..nb]);
+
+        let route = b"240940e3000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001 rmnet_data1\n";
+        let mut c = route.to_vec();
+        let mut d = route.to_vec();
+        let nc = filter_ipv6_route_buf(&mut c);
+        let nd = filter_ipv6_route_buf_ex(&mut d, &[]);
+        assert_eq!(&c[..nc], &d[..nd]);
+    }
 }
