@@ -346,6 +346,128 @@ const RTA_ALIGNTO: usize = 4;
 /// `rtattr` type carrying the output interface index (`RTA_OIF`).
 const RTA_OIF: u16 = 4;
 
+/// `rtattr` type carrying the route destination (`RTA_DST`).
+const RTA_DST: u16 = 1;
+/// `rtattr` types carrying the interface address in `RTM_NEWADDR`. Kernel
+/// parity: `IFA_LOCAL` is `ifa->addr`; `IFA_ADDRESS` is the peer (or the
+/// same value when there is no peer) — match LOCAL first, ADDRESS as
+/// fallback.
+const IFA_ADDRESS: u16 = 1;
+const IFA_LOCAL: u16 = 2;
+/// `rtmsg.rtm_family` / `ifaddrmsg.ifa_family` value for IPv6. The prefix
+/// paths gate on this — IPv4 is never filtered (hard constraint).
+const AF_INET6: u8 = 10;
+
+/// A prefix rule resolved to an interface index. Wire rules name ifaces;
+/// netlink messages carry indices, so the hook layer resolves
+/// `ifname → if_nametoindex` once per dump (never cached — bearers renumber
+/// on every bring-up, and a stale index would filter the wrong iface).
+#[derive(Clone, Copy, Debug)]
+pub struct IndexedPrefixRule {
+    pub index: u32,
+    pub addr: [u8; 16],
+    pub prefix_len: u8,
+}
+
+/// Prefix-rule check for one `RTM_NEWADDR` message (the whole message,
+/// starting at the `nlmsghdr`). True when the message is AF_INET6, its
+/// interface index is rule-matched, and its `IFA_LOCAL` (fallback
+/// `IFA_ADDRESS`) falls inside that rule's prefix.
+fn newaddr_prefix_hit(msg: &[u8], if_index: u32, prules: &[IndexedPrefixRule]) -> bool {
+    // ifaddrmsg: family(1) plen(1) flags(1) scope(1) index(4) = 8 bytes.
+    if prules.is_empty() || msg.len() < NLMSG_HDRLEN + 8 {
+        return false;
+    }
+    let payload = &msg[NLMSG_HDRLEN..];
+    if payload[0] != AF_INET6 {
+        return false;
+    }
+    if !prules.iter().any(|r| r.index == if_index) {
+        return false;
+    }
+    let mut local: Option<[u8; 16]> = None;
+    let mut address: Option<[u8; 16]> = None;
+    let mut pos = 8usize; // rtattrs follow the 8-byte ifaddrmsg
+    while pos + 4 <= payload.len() {
+        let Some(rta_len) = read_u16_ne(payload, pos) else {
+            break;
+        };
+        let Some(rta_type) = read_u16_ne(payload, pos + 2) else {
+            break;
+        };
+        let rta_len = rta_len as usize;
+        if rta_len < 4 || pos + rta_len > payload.len() {
+            break;
+        }
+        if rta_len >= 4 + 16 {
+            if let Some(bytes) = payload
+                .get(pos + 4..pos + 4 + 16)
+                .and_then(|b| <&[u8; 16]>::try_into(b).ok())
+            {
+                if rta_type == IFA_LOCAL {
+                    local = Some(*bytes);
+                } else if rta_type == IFA_ADDRESS {
+                    address = Some(*bytes);
+                }
+            }
+        }
+        pos += rta_align(rta_len);
+    }
+    let Some(addr) = local.or(address) else {
+        return false;
+    };
+    prules
+        .iter()
+        .any(|r| r.index == if_index && prefix_match(&addr, &r.addr, r.prefix_len))
+}
+
+/// Prefix-rule check for one `RTM_NEWROUTE` message. True when the message
+/// is AF_INET6, its `RTA_OIF` is rule-matched, and its DESTINATION falls
+/// inside that rule's prefix. A missing `RTA_DST` means `::/0` — all-zero
+/// address, kernel `rt6key.addr` parity (so a plen-0 rule covers it; the
+/// route's own `rtm_dst_len` is never consulted).
+fn newroute_prefix_hit(msg: &[u8], oif: Option<u32>, prules: &[IndexedPrefixRule]) -> bool {
+    if prules.is_empty() || msg.len() < NLMSG_HDRLEN + RTMSG_HDRLEN {
+        return false;
+    }
+    let payload = &msg[NLMSG_HDRLEN..];
+    if payload[0] != AF_INET6 {
+        return false;
+    }
+    let Some(oif) = oif else {
+        return false;
+    };
+    if !prules.iter().any(|r| r.index == oif) {
+        return false;
+    }
+    let mut dst = [0u8; 16];
+    let mut pos = RTMSG_HDRLEN;
+    while pos + 4 <= payload.len() {
+        let Some(rta_len) = read_u16_ne(payload, pos) else {
+            break;
+        };
+        let Some(rta_type) = read_u16_ne(payload, pos + 2) else {
+            break;
+        };
+        let rta_len = rta_len as usize;
+        if rta_len < 4 || pos + rta_len > payload.len() {
+            break;
+        }
+        if rta_type == RTA_DST {
+            if rta_len >= 4 + 16 {
+                if let Some(bytes) = payload.get(pos + 4..pos + 4 + 16) {
+                    dst.copy_from_slice(bytes);
+                }
+            }
+            break; // a malformed-short RTA_DST keeps dst = :: (no match below /0)
+        }
+        pos += rta_align(rta_len);
+    }
+    prules
+        .iter()
+        .any(|r| r.index == oif && prefix_match(&dst, &r.addr, r.prefix_len))
+}
+
 const fn nlmsg_align(len: usize) -> usize {
     (len + NLMSG_ALIGNTO - 1) & !(NLMSG_ALIGNTO - 1)
 }
@@ -405,9 +527,24 @@ fn read_u16_ne(data: &[u8], off: usize) -> Option<u16> {
 /// sees the VPN's default route by oif index even when the interface
 /// name itself is hidden, then renders it as the synthetic `if<index>`.
 ///
+/// Kept wrapper: VPN-index filtering only (no prefix rules).
 /// Returns the new valid length of the buffer.
 pub fn filter_netlink_dump(data: &mut [u8], vpn_indices: &[u32]) -> usize {
-    if vpn_indices.is_empty() || data.len() < NLMSG_HDRLEN {
+    filter_netlink_dump_ex(data, vpn_indices, &[])
+}
+
+/// `filter_netlink_dump` with global prefix rules: additionally drops
+/// AF_INET6 `RTM_NEWADDR` messages whose `IFA_LOCAL`/`IFA_ADDRESS` falls
+/// inside a rule prefix on the message's interface, and AF_INET6
+/// `RTM_NEWROUTE` messages whose destination falls inside a rule prefix on
+/// the output interface (kernel `inet6_fill_ifaddr` / `rt6_fill_node`
+/// parity). IPv4 messages are never prefix-filtered.
+pub fn filter_netlink_dump_ex(
+    data: &mut [u8],
+    vpn_indices: &[u32],
+    prules: &[IndexedPrefixRule],
+) -> usize {
+    if (vpn_indices.is_empty() && prules.is_empty()) || data.len() < NLMSG_HDRLEN {
         return data.len();
     }
 
@@ -435,11 +572,14 @@ pub fn filter_netlink_dump(data: &mut [u8], vpn_indices: &[u32]) -> usize {
             // ifinfomsg and ifaddrmsg.
             let if_index = read_u32_ne(data, read_pos + NLMSG_HDRLEN + 4).unwrap_or(0);
             vpn_indices.contains(&if_index)
+                || (nlmsg_type == RTM_NEWADDR
+                    && newaddr_prefix_hit(&data[read_pos..read_pos + nlmsg_len], if_index, prules))
         } else if nlmsg_type == RTM_NEWROUTE && nlmsg_len >= NLMSG_HDRLEN + RTMSG_HDRLEN {
             // Output interface is an RTA_OIF rtattr after struct rtmsg.
-            match route_oif(&data[read_pos..read_pos + nlmsg_len]) {
-                Some(oif) => vpn_indices.contains(&oif),
-                None => false,
+            let oif = route_oif(&data[read_pos..read_pos + nlmsg_len]);
+            match oif {
+                Some(o) if vpn_indices.contains(&o) => true,
+                _ => newroute_prefix_hit(&data[read_pos..read_pos + nlmsg_len], oif, prules),
             }
         } else {
             false
@@ -947,5 +1087,155 @@ tun0:  300    3    0    0\n"
         let nc = filter_ipv6_route_buf(&mut c);
         let nd = filter_ipv6_route_buf_ex(&mut d, &[]);
         assert_eq!(&c[..nc], &d[..nd]);
+    }
+
+    fn make_newaddr6(
+        if_index: u32,
+        ifa_local: Option<[u8; 16]>,
+        ifa_address: Option<[u8; 16]>,
+    ) -> Vec<u8> {
+        // nlmsghdr + ifaddrmsg(8) + rtattrs (16-byte payloads each).
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(&[10u8, 64, 0, 0]); // family=AF_INET6, plen, flags, scope
+        body.extend_from_slice(&if_index.to_ne_bytes());
+        for (ty, val) in [(2u16, ifa_local), (1u16, ifa_address)] {
+            if let Some(a) = val {
+                body.extend_from_slice(&(4u16 + 16).to_ne_bytes()); // rta_len
+                body.extend_from_slice(&ty.to_ne_bytes());
+                body.extend_from_slice(&a);
+            }
+        }
+        let total = (NLMSG_HDRLEN + body.len()) as u32;
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&total.to_ne_bytes());
+        msg.extend_from_slice(&RTM_NEWADDR.to_ne_bytes());
+        msg.extend_from_slice(&0u16.to_ne_bytes());
+        msg.extend_from_slice(&1u32.to_ne_bytes());
+        msg.extend_from_slice(&0u32.to_ne_bytes());
+        msg.extend_from_slice(&body);
+        msg
+    }
+
+    fn make_newroute6(oif: u32, dst: Option<[u8; 16]>) -> Vec<u8> {
+        let mut body: Vec<u8> = Vec::new();
+        body.extend_from_slice(&[10u8, 0, 0, 0, 254, 3, 0, 1]); // rtmsg, family AF_INET6
+        body.extend_from_slice(&0u32.to_ne_bytes()); // rtm_flags
+        body.extend_from_slice(&8u16.to_ne_bytes()); // RTA_OIF rta_len
+        body.extend_from_slice(&RTA_OIF.to_ne_bytes());
+        body.extend_from_slice(&oif.to_ne_bytes());
+        if let Some(d) = dst {
+            body.extend_from_slice(&(4u16 + 16).to_ne_bytes());
+            body.extend_from_slice(&RTA_DST.to_ne_bytes());
+            body.extend_from_slice(&d);
+        }
+        let total = (NLMSG_HDRLEN + body.len()) as u32;
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&total.to_ne_bytes());
+        msg.extend_from_slice(&RTM_NEWROUTE.to_ne_bytes());
+        msg.extend_from_slice(&0u16.to_ne_bytes());
+        msg.extend_from_slice(&1u32.to_ne_bytes());
+        msg.extend_from_slice(&0u32.to_ne_bytes());
+        msg.extend_from_slice(&body);
+        msg
+    }
+
+    fn prule(index: u32, addr: [u8; 16], plen: u8) -> IndexedPrefixRule {
+        IndexedPrefixRule {
+            index,
+            addr,
+            prefix_len: plen,
+        }
+    }
+
+    #[test]
+    fn newaddr6_dropped_by_local_prefix() {
+        let inside = [
+            0x24, 0x09, 0x40, 0xe3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+        ];
+        let mut buf = Vec::new();
+        buf.extend(make_newaddr6(5, Some(inside), None)); // covered — drop
+        buf.extend(make_newaddr6(6, Some(inside), None)); // same addr, other index — keep
+        let half = buf.len() / 2;
+        let prules = [prule(5, PFX_RMNET1, 32)];
+        let n = filter_netlink_dump_ex(&mut buf, &[], &prules);
+        assert_eq!(n, half);
+        assert_eq!(read_u32_ne(&buf, NLMSG_HDRLEN + 4), Some(6));
+    }
+
+    #[test]
+    fn newaddr6_falls_back_to_ifa_address() {
+        let inside = [
+            0x24, 0x09, 0x40, 0xe3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+        ];
+        let mut buf = make_newaddr6(5, None, Some(inside));
+        let prules = [prule(5, PFX_RMNET1, 32)];
+        assert_eq!(filter_netlink_dump_ex(&mut buf, &[], &prules), 0);
+    }
+
+    #[test]
+    fn newaddr6_ipv4_never_filtered() {
+        // Same bytes but family = AF_INET (2): the hard-constraint gate.
+        let mut msg = make_newaddr6(
+            5,
+            Some([
+                0x24, 0x09, 0x40, 0xe3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+            ]),
+            None,
+        );
+        msg[NLMSG_HDRLEN] = 2; // ifa_family = AF_INET
+        let len = msg.len();
+        let prules = [prule(5, PFX_RMNET1, 32)];
+        assert_eq!(filter_netlink_dump_ex(&mut msg, &[], &prules), len);
+    }
+
+    #[test]
+    fn newroute6_dropped_by_dst_prefix() {
+        let covered = [0x24, 0x09, 0x40, 0xe3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut buf = Vec::new();
+        buf.extend(make_newroute6(5, Some(covered))); // covered — drop
+        buf.extend(make_newroute6(
+            5,
+            Some([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        )); // fe80 — keep
+        let half = buf.len() / 2;
+        let prules = [prule(5, PFX_RMNET1, 32)];
+        let n = filter_netlink_dump_ex(&mut buf, &[], &prules);
+        assert_eq!(n, half);
+    }
+
+    #[test]
+    fn newroute6_missing_dst_means_default() {
+        // No RTA_DST = ::/0 (all-zero). A plen-0 rule covers it; a /32 doesn't.
+        let mut buf = make_newroute6(5, None);
+        let plen0 = [prule(5, [0u8; 16], 0)];
+        assert_eq!(filter_netlink_dump_ex(&mut buf, &[], &plen0), 0);
+        let mut buf2 = make_newroute6(5, None);
+        let len2 = buf2.len();
+        let plen32 = [prule(5, PFX_RMNET1, 32)];
+        assert_eq!(filter_netlink_dump_ex(&mut buf2, &[], &plen32), len2);
+    }
+
+    #[test]
+    fn newroute6_short_dst_rta_is_safe_miss() {
+        // rta_len < 20 for RTA_DST: treated as absent (:: — no /32 match).
+        let mut msg = make_newroute6(
+            5,
+            Some([0x24, 0x09, 0x40, 0xe3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        );
+        // Patch the RTA_DST rta_len down to 12 (4 header + 8 payload < 16-byte addr).
+        let rta_dst_len_off = NLMSG_HDRLEN + RTMSG_HDRLEN + 8;
+        msg[rta_dst_len_off..rta_dst_len_off + 2].copy_from_slice(&(12u16).to_ne_bytes());
+        let len = msg.len();
+        let prules = [prule(5, PFX_RMNET1, 32)];
+        assert_eq!(filter_netlink_dump_ex(&mut msg, &[], &prules), len);
+    }
+
+    #[test]
+    fn netlink_wrapper_unchanged_without_rules() {
+        let mut buf = Vec::new();
+        buf.extend(make_nlmsg(RTM_NEWADDR, 7));
+        buf.extend(make_nlmsg(RTM_NEWADDR, 2));
+        let n = filter_netlink_dump(&mut buf, &[7]);
+        assert_eq!(n, 24);
     }
 }

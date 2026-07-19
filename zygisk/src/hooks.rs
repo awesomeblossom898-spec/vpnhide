@@ -870,7 +870,8 @@ pub unsafe extern "C" fn hooked_recvmsg(fd: c_int, msg: *mut libc::msghdr, flags
         return ret;
     }
     let (indices, n) = collect_vpn_iface_indices();
-    if n == 0 {
+    let (prules, m) = resolve_prefix_rules();
+    if n == 0 && m == 0 {
         return ret;
     }
 
@@ -884,7 +885,7 @@ pub unsafe extern "C" fn hooked_recvmsg(fd: c_int, msg: *mut libc::msghdr, flags
                 hdr.msg_iovlen,
                 in_iovecs,
                 &mut scratch,
-                |data| crate::filter::filter_netlink_dump(data, &indices[..n]),
+                |data| crate::filter::filter_netlink_dump_ex(data, &indices[..n], &prules[..m]),
             )
         }) else {
             return ret;
@@ -1026,11 +1027,26 @@ unsafe fn maybe_filter_netlink_buf(fd: c_int, buf: *mut u8, ret: isize) -> isize
     }
 
     let (indices, n) = collect_vpn_iface_indices();
-    if n == 0 {
+    // Prefix rules only address v6 address/route messages; RTM_NEWLINK has
+    // no address semantics and skips the resolve entirely.
+    let (prules, m) =
+        if nlmsg_type == crate::filter::RTM_NEWADDR || nlmsg_type == crate::filter::RTM_NEWROUTE {
+            resolve_prefix_rules()
+        } else {
+            (
+                [crate::filter::IndexedPrefixRule {
+                    index: 0,
+                    addr: [0u8; 16],
+                    prefix_len: 0,
+                }; crate::filter::MAX_PREFIX_RULES],
+                0,
+            )
+        };
+    if n == 0 && m == 0 {
         return ret;
     }
 
-    crate::filter::filter_netlink_dump(data, &indices[..n]) as isize
+    crate::filter::filter_netlink_dump_ex(data, &indices[..n], &prules[..m]) as isize
 }
 
 // ============================================================================
@@ -1165,6 +1181,53 @@ pub unsafe extern "C" fn hooked_recvfrom_chk(
     ret - (in_buf - filtered)
 }
 
+/// Resolve the global prefix rules to interface indices for this dump.
+/// `if_nametoindex` issues ioctl(SIOCGIFINDEX), which our ioctl hook blocks
+/// for VPN names — run under the IN_GETIFADDRS guard like
+/// `collect_vpn_iface_indices`. Resolved per call, never cached: bearers
+/// renumber (rmnet_dataN churn) and a stale index would filter the wrong
+/// iface. Empty rules resolve to an empty array without a single syscall.
+fn resolve_prefix_rules() -> (
+    [crate::filter::IndexedPrefixRule; crate::filter::MAX_PREFIX_RULES],
+    usize,
+) {
+    use crate::filter::{IndexedPrefixRule, MAX_PREFIX_RULES};
+
+    let mut out = [IndexedPrefixRule {
+        index: 0,
+        addr: [0u8; 16],
+        prefix_len: 0,
+    }; MAX_PREFIX_RULES];
+    let mut n = 0usize;
+
+    let rules = crate::prefix_rules();
+    if rules.is_empty() {
+        return (out, 0);
+    }
+    for rule in rules.iter().take(MAX_PREFIX_RULES) {
+        let Ok(cname) = std::ffi::CString::new(rule.ifname.as_str()) else {
+            continue;
+        };
+        let idx = IN_GETIFADDRS.with(|f| {
+            let prev = f.get();
+            f.set(true);
+            let i = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+            f.set(prev);
+            i
+        });
+        if idx == 0 {
+            continue; // iface down/renumbered right now — rule inert this dump
+        }
+        out[n] = IndexedPrefixRule {
+            index: idx,
+            addr: rule.addr,
+            prefix_len: rule.prefix_len,
+        };
+        n += 1;
+    }
+    (out, n)
+}
+
 /// Collect interface indices of VPN interfaces. Uses real_getifaddrs
 /// (with IN_GETIFADDRS guard) and `if_nametoindex` (which calls
 /// ioctl(SIOCGIFINDEX) — passed through by our ioctl hook).
@@ -1266,6 +1329,74 @@ mod iovec_tests {
         actual.extend(rest);
         assert_eq!(filtered, expected.len());
         assert_eq!(&actual[..filtered], expected.as_slice());
+    }
+
+    fn make_route6_msg(oif: u32, dst: [u8; 16]) -> Vec<u8> {
+        // nlmsghdr(16) + rtmsg(12) + RTA_OIF(8) + RTA_DST(20) = 56 bytes.
+        let mut msg = Vec::new();
+        msg.extend_from_slice(&56u32.to_ne_bytes()); // nlmsg_len
+        msg.extend_from_slice(&crate::filter::RTM_NEWROUTE.to_ne_bytes());
+        msg.extend_from_slice(&0u16.to_ne_bytes()); // flags
+        msg.extend_from_slice(&1u32.to_ne_bytes()); // seq
+        msg.extend_from_slice(&0u32.to_ne_bytes()); // pid
+        msg.extend_from_slice(&[10u8, 64, 0, 0, 254, 3, 0, 1]); // rtmsg: AF_INET6, dst_len 64, table main, unicast
+        msg.extend_from_slice(&0u32.to_ne_bytes()); // rtm_flags
+        msg.extend_from_slice(&8u16.to_ne_bytes()); // RTA_OIF rta_len
+        msg.extend_from_slice(&4u16.to_ne_bytes()); // RTA_OIF = 4
+        msg.extend_from_slice(&oif.to_ne_bytes());
+        msg.extend_from_slice(&20u16.to_ne_bytes()); // RTA_DST rta_len
+        msg.extend_from_slice(&1u16.to_ne_bytes()); // RTA_DST = 1
+        msg.extend_from_slice(&dst);
+        msg
+    }
+
+    #[test]
+    fn scatter_gather_filters_prefix_route_across_iovec_boundary() {
+        use crate::filter::{IndexedPrefixRule, filter_netlink_dump_ex};
+
+        let inside = [0x24, 0x09, 0x40, 0xe3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let drop = make_route6_msg(5, inside); // oif 5 — rule-matched, covered dst
+        let keep = make_route6_msg(6, inside); // oif 6 — not rule-matched
+        let prules = [IndexedPrefixRule {
+            index: 5,
+            addr: inside,
+            prefix_len: 32,
+        }];
+
+        // One datagram: drop-msg then keep-msg; the iovec boundary lands
+        // INSIDE the first message (byte 20 of 56).
+        let mut datagram = drop.clone();
+        datagram.extend_from_slice(&keep);
+        assert_eq!(datagram.len(), 112);
+
+        let mut first = vec![0u8; 20];
+        let mut second = vec![0u8; 92];
+        first.copy_from_slice(&datagram[..20]);
+        second.copy_from_slice(&datagram[20..]);
+
+        let mut iov = [
+            libc::iovec {
+                iov_base: first.as_mut_ptr().cast(),
+                iov_len: first.len(),
+            },
+            libc::iovec {
+                iov_base: second.as_mut_ptr().cast(),
+                iov_len: second.len(),
+            },
+        ];
+        let mut scratch = Vec::new();
+        let filtered = unsafe {
+            rewrite_iovec_payload(iov.as_mut_ptr(), 2, 112, &mut scratch, |data| {
+                filter_netlink_dump_ex(data, &[], &prules)
+            })
+        };
+        assert_eq!(filtered, Some(56));
+        // The surviving bytes are the keep message, scattered back across
+        // the iovec boundary.
+        let mut gathered = Vec::new();
+        gathered.extend_from_slice(&first);
+        gathered.extend_from_slice(&second[..36]);
+        assert_eq!(gathered, keep);
     }
 }
 
