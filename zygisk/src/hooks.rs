@@ -870,8 +870,41 @@ pub unsafe extern "C" fn hooked_recvmsg(fd: c_int, msg: *mut libc::msghdr, flags
     if in_iovecs < 16 {
         return ret;
     }
+
+    // Quick check: first message type must be one we filter. Route dumps
+    // (RTM_GETROUTE) come back as RTM_NEWROUTE and must not be skipped —
+    // that gap was the issue #86 `if<N>` leak. A dump arrives homogeneous
+    // per request, so the first message's type speaks for the whole
+    // datagram (the single-iovec path already relies on this).
+    let mut nlhdr = [0u8; 16];
+    let hdr_ok = unsafe { read_iovec_prefix(hdr.msg_iov, hdr.msg_iovlen, &mut nlhdr) };
+    if !hdr_ok {
+        return ret;
+    }
+    let nlmsg_type = u16::from_ne_bytes([nlhdr[4], nlhdr[5]]);
+    if nlmsg_type != crate::filter::RTM_NEWADDR
+        && nlmsg_type != crate::filter::RTM_NEWLINK
+        && nlmsg_type != crate::filter::RTM_NEWROUTE
+    {
+        return ret;
+    }
+
     let (indices, n) = collect_vpn_iface_indices();
-    let (prules, m) = resolve_prefix_rules();
+    // Prefix rules only address v6 address/route messages; RTM_NEWLINK has
+    // no address semantics and skips the resolve entirely.
+    let (prules, m) =
+        if nlmsg_type == crate::filter::RTM_NEWADDR || nlmsg_type == crate::filter::RTM_NEWROUTE {
+            resolve_prefix_rules()
+        } else {
+            (
+                [crate::filter::IndexedPrefixRule {
+                    index: 0,
+                    addr: [0u8; 16],
+                    prefix_len: 0,
+                }; crate::filter::MAX_PREFIX_RULES],
+                0,
+            )
+        };
     if n == 0 && m == 0 {
         return ret;
     }
@@ -916,6 +949,40 @@ unsafe fn iovec_payload_len(
         capacity = capacity.saturating_add(entry.iov_len);
     }
     Some(returned.min(capacity))
+}
+
+/// Read the first `out.len()` payload bytes from an iovec array (they may be
+/// scattered across several entries). Returns false when the payload runs
+/// short or a descriptor is invalid, so the caller can fall back to the
+/// original unmodified result.
+///
+/// # Safety
+///
+/// `iov` must point to `iovlen` readable descriptors whose first `out.len()`
+/// payload bytes are valid for reads. At the `hooked_recvmsg` call site this
+/// is already established: `iovec_payload_len` returned `Some(in_iovecs)`
+/// with `in_iovecs >= out.len()`, having validated that every non-zero-length
+/// entry in the writable prefix has a non-null base — reading those bytes is
+/// a strict subset of what the gather/scatter would touch.
+unsafe fn read_iovec_prefix(iov: *const libc::iovec, iovlen: usize, out: &mut [u8]) -> bool {
+    let mut copied = 0usize;
+    for index in 0..iovlen {
+        if copied == out.len() {
+            break;
+        }
+        let entry = unsafe { &*iov.add(index) };
+        let take = (out.len() - copied).min(entry.iov_len);
+        if take == 0 {
+            continue;
+        }
+        if entry.iov_base.is_null() {
+            return false;
+        }
+        let bytes = unsafe { core::slice::from_raw_parts(entry.iov_base.cast::<u8>(), take) };
+        out[copied..copied + take].copy_from_slice(bytes);
+        copied += take;
+    }
+    copied == out.len()
 }
 
 /// Gather a returned iovec prefix, compact it with `filter`, and scatter the
@@ -1542,7 +1609,7 @@ fn collect_vpn_iface_indices() -> ([u32; crate::filter::MAX_VPN_ADDRS], usize) {
 
 #[cfg(test)]
 mod iovec_tests {
-    use super::{iovec_payload_len, rewrite_iovec_payload};
+    use super::{iovec_payload_len, read_iovec_prefix, rewrite_iovec_payload};
     use crate::filter::{RTM_NEWLINK, filter_netlink_dump};
 
     fn make_nlmsg(if_index: u32) -> Vec<u8> {
@@ -1673,6 +1740,72 @@ mod iovec_tests {
         gathered.extend_from_slice(&first);
         gathered.extend_from_slice(&second[..36]);
         assert_eq!(gathered, keep);
+    }
+
+    #[test]
+    fn read_iovec_prefix_single_iov() {
+        let mut payload = make_nlmsg(2);
+        let iovecs = [libc::iovec {
+            iov_base: payload.as_mut_ptr().cast(),
+            iov_len: payload.len(),
+        }];
+        let mut out = [0u8; 16];
+        assert!(unsafe { read_iovec_prefix(iovecs.as_ptr(), iovecs.len(), &mut out) });
+        assert_eq!(&out[..], &payload[..16]);
+    }
+
+    #[test]
+    fn read_iovec_prefix_scattered_across_iovecs() {
+        let mut payload = Vec::new();
+        payload.extend(make_nlmsg(2));
+        payload.extend(make_nlmsg(7));
+        // A zero-length leading entry is skipped; the 16-byte prefix then
+        // gathers across the remaining three entries (partial take on c).
+        let mut a = payload[..5].to_vec();
+        let mut b = payload[5..13].to_vec();
+        let mut c = payload[13..].to_vec();
+        let iovecs = [
+            libc::iovec {
+                iov_base: core::ptr::null_mut(),
+                iov_len: 0,
+            },
+            libc::iovec {
+                iov_base: a.as_mut_ptr().cast(),
+                iov_len: a.len(),
+            },
+            libc::iovec {
+                iov_base: b.as_mut_ptr().cast(),
+                iov_len: b.len(),
+            },
+            libc::iovec {
+                iov_base: c.as_mut_ptr().cast(),
+                iov_len: c.len(),
+            },
+        ];
+        let mut out = [0u8; 16];
+        assert!(unsafe { read_iovec_prefix(iovecs.as_ptr(), iovecs.len(), &mut out) });
+        assert_eq!(&out[..], &payload[..16]);
+    }
+
+    #[test]
+    fn read_iovec_prefix_short_payload_is_false() {
+        let mut small = [0u8; 8];
+        let iovecs = [libc::iovec {
+            iov_base: small.as_mut_ptr().cast(),
+            iov_len: small.len(),
+        }];
+        let mut out = [0u8; 16];
+        assert!(!unsafe { read_iovec_prefix(iovecs.as_ptr(), iovecs.len(), &mut out) });
+    }
+
+    #[test]
+    fn read_iovec_prefix_null_base_is_false() {
+        let iovecs = [libc::iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 8,
+        }];
+        let mut out = [0u8; 16];
+        assert!(!unsafe { read_iovec_prefix(iovecs.as_ptr(), iovecs.len(), &mut out) });
     }
 }
 

@@ -225,21 +225,32 @@ fn first_field_addr_hit(line: &[u8], ifname: &[u8], rules: &[PrefixRule]) -> boo
     if rules.is_empty() || ifname.is_empty() {
         return false;
     }
-    let field_len = line
+    // C parity (vpnhide_compact_if_inet6_lines): the first token starts
+    // after any leading spaces/tabs; `\r` is not a separator here either,
+    // so a CR inside the token fails the 32-hex parse exactly like the C.
+    // Kernel procfs never emits either byte — parity discipline only.
+    let field_start = line
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t')
+        .unwrap_or(line.len());
+    let field_end = line[field_start..]
         .iter()
         .position(|&b| b == b' ' || b == b'\t' || b == b'\n')
+        .map(|p| field_start + p)
         .unwrap_or(line.len());
-    let Some(addr) = parse_addr32_hex(&line[..field_len]) else {
+    let Some(addr) = parse_addr32_hex(&line[field_start..field_end]) else {
         return false;
     };
     prefix_rule_hit(rules, ifname, &addr)
 }
 
 /// Extract the last whitespace-delimited field from a line (trimming
-/// trailing newline/spaces).
+/// trailing `\n`/`\r`/space/tab; the start-walk stops at space/tab only).
+/// `\r` is a line-END trim, never a field separator — kernel procfs never
+/// emits one, so this is bit-exact C parity discipline, not a bug fix.
 fn extract_last_field(line: &[u8]) -> &[u8] {
     let mut end = line.len();
-    while end > 0 && matches!(line[end - 1], b'\n' | b' ' | b'\t') {
+    while end > 0 && matches!(line[end - 1], b'\n' | b'\r' | b' ' | b'\t') {
         end -= 1;
     }
     let mut start = end;
@@ -1175,6 +1186,66 @@ tun0:  300    3    0    0\n"
         let mut buf = input.to_vec();
         let n = filter_if_inet6_buf_ex(&mut buf, &[]);
         assert_eq!(&buf[..n], input);
+    }
+
+    #[test]
+    fn if_inet6_ex_leading_ws_lines_drop_covered_addr() {
+        // C parity: the address token starts after any leading spaces/tabs.
+        // Kernel procfs never emits them; this pins the parity behavior.
+        let rules = [rule("rmnet_data1", PFX_RMNET1, 32)];
+        let input = b"  240940e3000000000000000000000001 00000005 40 00 00 rmnet_data1\n\
+                      \t240940e3000000000000000000000002 00000005 40 00 00 rmnet_data1\n\
+                      24094123000000000000000000000001 00000007 40 00 00 rmnet_data3\n";
+        let mut buf = input.to_vec();
+        let n = filter_if_inet6_buf_ex(&mut buf, &rules);
+        let out = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(
+            !out.contains("240940e3"),
+            "leading space/tab lines with covered addr dropped"
+        );
+        assert!(out.contains("24094123"), "non-rule iface kept");
+    }
+
+    #[test]
+    fn if_inet6_ex_crlf_lines_drop_by_name_and_rule() {
+        // CRLF endings: `\r` is a line-end trim (C parity), so the last
+        // field still extracts cleanly for both the VPN-name path and the
+        // prefix-rule path.
+        let rules = [rule("rmnet_data1", PFX_RMNET1, 32)];
+        let input = b"240940e3000000000000000000000001 00000005 40 00 00 tun0\r\n\
+                      240940e3000000000000000000000002 00000005 40 00 00 rmnet_data1\r\n\
+                      24094123000000000000000000000001 00000007 40 00 00 rmnet_data3\r\n";
+        let mut buf = input.to_vec();
+        let n = filter_if_inet6_buf_ex(&mut buf, &rules);
+        let out = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(!out.contains("tun0"), "CRLF: VPN-name path drops");
+        assert!(
+            !out.contains("240940e3"),
+            "CRLF: rule path drops covered addr"
+        );
+        assert!(out.contains("24094123"), "CRLF: other iface kept");
+    }
+
+    #[test]
+    fn if_inet6_ex_leading_ws_non_hex_and_embedded_cr_kept() {
+        // No-regression pins: leading whitespace followed by a NON-32-hex
+        // token is still a cheap miss, and a `\r` inside the first token is
+        // not a field separator (C parity) — the 33-byte token fails the
+        // 32-hex parse. Both lines stay.
+        let rules = [rule("rmnet_data1", PFX_RMNET1, 32)];
+        let input = b"  zz0940e3000000000000000000000001 00000005 40 00 00 rmnet_data1\n\
+                      240940e3000000000000000000000001\r 00000005 40 00 00 rmnet_data1\n";
+        let mut buf = input.to_vec();
+        let n = filter_if_inet6_buf_ex(&mut buf, &rules);
+        assert_eq!(&buf[..n], input);
+    }
+
+    #[test]
+    fn extract_last_field_trims_crlf() {
+        // `\r` trims at the line end only (C parity), never mid-token.
+        assert_eq!(extract_last_field(b"x x tun0\r\n"), b"tun0");
+        assert_eq!(extract_last_field(b"x x tun0\n"), b"tun0");
+        assert_eq!(extract_last_field(b"x x tun0 \t\n"), b"tun0");
     }
 
     #[test]
