@@ -981,8 +981,8 @@ private fun AppProbeSubtitle(
 
 @Composable
 private fun appLabel(app: AppProbeStats): String {
-    if (app.uid == SENTINEL_UID) return stringResource(R.string.statistics_global_uid)
-    return app.packageNames.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: stringResource(R.string.statistics_unknown_uid, app.uid)
+    val unknown = stringResource(R.string.statistics_unknown_uid, app.uid)
+    return statsAppLabel(app.uid, app.packageNames, stringResource(R.string.statistics_global_uid)) { unknown }
 }
 
 @Composable

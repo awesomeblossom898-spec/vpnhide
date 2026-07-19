@@ -6,6 +6,21 @@ import dev.okhsunrog.vpnhide.generated.HookIds
 // never a real app uid — render it as "global", not a numeric fallback.
 internal const val SENTINEL_UID = 0xFFFFFFFFL
 
+// The Statistics row label decision as a pure function so it is JVM-testable
+// without a Compose runtime; StatisticsScreen.appLabel resolves the strings
+// and delegates here.
+internal fun statsAppLabel(
+    uid: Long,
+    packageNames: List<String>,
+    globalLabel: String,
+    unknownLabel: (Long) -> String,
+): String =
+    if (uid == SENTINEL_UID) {
+        globalLabel
+    } else {
+        packageNames.takeIf { it.isNotEmpty() }?.joinToString(", ") ?: unknownLabel(uid)
+    }
+
 // Where a detection method lives — used to group methods on the per-app card and
 // to explain (native syscall/libc vs Java API vs package enumeration) at a
 // glance. "Native" covers both the kernel backends and Zygisk's libc hooks.

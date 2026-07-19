@@ -176,4 +176,33 @@ class ProbeStatsTest {
         assertNull(resolveAppSummary(appStats("com.unknown"), byPackage))
         assertNull(resolveAppSummary(appStats(), byPackage)) // unknown uid, no packages
     }
+
+    @Test
+    fun `stats app label returns the global label for the sentinel uid`() {
+        val label = statsAppLabel(SENTINEL_UID, emptyList(), "Global") { error("unknownLabel must not be called") }
+        assertEquals("Global", label)
+    }
+
+    @Test
+    fun `stats app label falls back to the unknown label with the uid when no packages are listed`() {
+        var seenUid: Long? = null
+        val label =
+            statsAppLabel(10100, emptyList(), "Global") { uid ->
+                seenUid = uid
+                "uid $uid"
+            }
+        assertEquals("uid 10100", label)
+        assertEquals(10100L, seenUid)
+    }
+
+    @Test
+    fun `stats app label joins packages and a sign-extended -1 uid is not the sentinel`() {
+        // SENTINEL_UID is the zero-extended 0xFFFFFFFF; a sign-extended -1L must
+        // NOT take the global branch (the parseHex zero-extension regression).
+        assertEquals(4294967295L, SENTINEL_UID)
+        val joined = statsAppLabel(-1L, listOf("com.a", "com.b"), "Global") { error("unknownLabel must not be called") }
+        assertEquals("com.a, com.b", joined)
+        val fallback = statsAppLabel(-1L, emptyList(), "Global") { uid -> "uid $uid" }
+        assertEquals("uid -1", fallback)
+    }
 }
