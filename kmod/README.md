@@ -11,7 +11,7 @@ Zero footprint in the target app's process -- no modified function prologues, no
 | `dev_ioctl` | `SIOCGIFFLAGS`, `SIOCGIFNAME`, and other per-interface ioctls: returns `-ENODEV` for VPN interfaces | Direct `ioctl()` calls from native code (Flutter/Dart, JNI, C/C++) |
 | `sock_ioctl` | `SIOCGIFCONF`: compacts VPN entries out of the returned interface array | Interface enumeration via `ioctl(SIOCGIFCONF)` |
 | `rtnl_fill_ifinfo` | Trims VPN entries from RTM_NEWLINK netlink dumps via `skb_trim` and returns 0 | `getifaddrs()` (which uses netlink internally), any netlink-based interface enumeration |
-| `inet6_fill_ifaddr` | Trims VPN entries from RTM_GETADDR IPv6 responses via `skb_trim` | IPv6 address enumeration over netlink |
+| `inet6_fill_ifaddr` | Trims VPN-interface and global prefix-rule address entries from RTM_GETADDR IPv6 responses via `skb_trim` | IPv6 address enumeration over netlink |
 | `inet_fill_ifaddr` | Trims VPN entries from RTM_GETADDR IPv4 responses via `skb_trim` | IPv4 address enumeration over netlink |
 | `fib_route_seq_show` | Forward-scans for VPN lines and compacts them out with `memmove` | `/proc/net/route` reads |
 | `ipv6_route_seq_show` | Forward-scans for VPN-interface and global prefix-rule route-destination lines and compacts them out | `/proc/net/ipv6_route` reads |

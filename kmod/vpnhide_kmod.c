@@ -15,6 +15,7 @@
  *   - inet_fill_ifaddr: filters RTM_GETADDR IPv4 responses (getifaddrs)
  *   - fib_route_seq_show: filters /proc/net/route entries
  *   - ipv6_route_seq_show: filters /proc/net/ipv6_route entries
+ *   - if6_seq_show: filters /proc/net/if_inet6 entries
  *   - fib_dump_info: filters IPv4 RTM_GETROUTE dump replies
  *   - rt6_fill_node: filters IPv6 RTM_GETROUTE replies
  *   - fib_nl_fill_rule: filters policy routing rules for target UIDs
@@ -167,7 +168,11 @@ static bool hook_active(u32 hook_id)
 }
 
 /* Global (uid-independent) prefix match: true if `addr` on `ifname` is covered
- * by any configured prefix rule. Reads prefix_rules[] under targets_lock. */
+ * by any configured prefix rule. Reads prefix_rules[] under targets_lock.
+ * Lock tradeoff: with >=1 rule configured every caller takes targets_lock
+ * (callers gate to app/shell readers first) — accepted, since the critical
+ * section is a <=8-iteration (MAX_PREFIX_RULES) byte compare and contention
+ * is bounded by seq/netlink read concurrency. */
 static bool prefix_rule_hits(const char *ifname, const unsigned char addr[16])
 {
 	bool hit = false;
@@ -1033,12 +1038,12 @@ static struct kretprobe fib_route_krp = {
 };
 
 /* ================================================================== */
-/*  Hook 7: ipv6_route_seq_show — /proc/net/ipv6_route                */
+/*  Hook 7: ipv6_route_seq_show — /proc/net/ipv6_route (hook id 1)    */
 /*                                                                    */
 /*  IPv6 route lines store the route destination in the first field   */
 /*  and the interface name in the last. We compact out lines that a   */
-/*  VPN-iface match (per-uid) or a global prefix rule covers,         */
-/*  mirroring the if6_seq strategy.                                   */
+/*  VPN-iface match (per-uid) or a global prefix rule covers; the     */
+/*  uid-gated prefix-filter path mirrors if6_seq's.                   */
 /* ================================================================== */
 
 static int ipv6_route_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
@@ -1117,11 +1122,12 @@ static struct kretprobe ipv6_route_krp = {
 };
 
 /* ================================================================== */
-/*  Hook 11: if6_seq_show — /proc/net/if_inet6                        */
+/*  Hook 8: if6_seq_show — /proc/net/if_inet6 (hook id 25)            */
 /*                                                                    */
 /*  Per-iface IPv6 address list. Address is the FIRST field, devname  */
 /*  the LAST. We compact out lines that a VPN-iface match (per-uid)   */
-/*  or a global prefix rule covers, mirroring the ipv6_route strategy.*/
+/*  or a global prefix rule covers; the seq-line compaction (save     */
+/*  seq/count on entry, compact on return) mirrors ipv6_route's.      */
 /* ================================================================== */
 static int if6_seq_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 {
@@ -1379,7 +1385,7 @@ static int route_skb_ret(struct route_skb_data *data, struct pt_regs *regs,
 }
 
 /* ================================================================== */
-/*  Hook 8: fib_dump_info — IPv4 RTM_GETROUTE dumps                   */
+/*  Hook 9: fib_dump_info — IPv4 RTM_GETROUTE dumps                   */
 /*                                                                    */
 /*  arm64: x0=skb, x4=fri (struct fib_rt_info*)                      */
 /* ================================================================== */
@@ -1437,7 +1443,7 @@ static struct kretprobe fib_dump_krp = {
 };
 
 /* ================================================================== */
-/*  Hook 9: rt6_fill_node — IPv6 RTM_GETROUTE                         */
+/*  Hook 10: rt6_fill_node — IPv6 RTM_GETROUTE                        */
 /*                                                                    */
 /*  arm64: x1=skb, x2=rt (struct fib6_info*), x3=dst                 */
 /* ================================================================== */
@@ -1542,7 +1548,7 @@ static struct kretprobe rt6_fill_krp = {
  */
 
 /* ================================================================== */
-/*  Hook 10: fib_nl_fill_rule — RTM_GETRULE policy rules              */
+/*  Hook 11: fib_nl_fill_rule — RTM_GETRULE policy rules              */
 /*                                                                    */
 /*  arm64: x0=skb, x1=rule (struct fib_rule*)                        */
 /* ================================================================== */

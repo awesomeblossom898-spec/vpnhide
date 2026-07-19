@@ -300,8 +300,9 @@ static void test_compact_if_inet6_vpn_and_edges(void)
 		buf,
 		"24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3");
 
-	/* Case B: bytes before `start` are never touched (even a VPN line); the
-	 * tun0 line after start is removed by vpn_match (rules unused here). */
+	/* Case B: bytes before `start` are never touched (the pre-start
+	 * rmnet_data1 line is kept verbatim); the tun0 line after start is
+	 * removed by vpn_match (rules unused here). */
 	{
 		char buf2[256] =
 			"24014900a3f1e04d54fdd7fffeb173bf 1e 40 00 00 rmnet_data1\n"

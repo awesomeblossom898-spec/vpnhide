@@ -334,7 +334,10 @@ struct vpnhide_prefix_rule {
  * matches fired by non-target UIDs are reported under this uid, never in the
  * per-UID stats table. Real Android app/system UIDs never reach (uid_t)-1 (the
  * kernel invalid uid); on the wire this prints as 0xffffffff. Shared by both
- * kernel backends — kept here (not per-backend) so the value can never drift. */
+ * kernel backends — kept here (not per-backend) so the value can never drift.
+ * Theoretical aliasing: from_kuid() returns -1 for a uid unmapped in
+ * init_user_ns (only possible via a child userns) — unreachable on Android,
+ * accepted (phase-2 review minor). */
 #define VPNHIDE_GLOBAL_STATS_UID ((unsigned int)-1)
 
 /* one sparse `<hook_id>:<count>` stats cell for a given uid (§4.3). The
