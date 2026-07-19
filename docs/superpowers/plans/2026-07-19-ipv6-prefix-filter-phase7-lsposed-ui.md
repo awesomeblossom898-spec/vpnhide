@@ -410,7 +410,6 @@ internal fun PrefixRulesSettingsScreen(onBack: () -> Unit) {
         }
     var rules by remember(initialRules) { mutableStateOf(initialRules) }
     val dirty = rules != initialRules
-    val firstError = validateEditablePrefixRules(rules)
 
     BackHandler(onBack = onBack)
 
@@ -435,7 +434,7 @@ internal fun PrefixRulesSettingsScreen(onBack: () -> Unit) {
         bottomBar = {
             PrefixRulesSaveBar(
                 ruleCount = rules.size,
-                enabled = dirty && !saving && firstError == null,
+                enabled = dirty && !saving,
                 saving = saving,
                 onSave = {
                     attemptedSave = true
@@ -866,7 +865,7 @@ Expected: package installs, launches, NO FATAL entries. (If the LSPosed app was 
 
 - [ ] **Step 2: User-driven editor flow**
 
-Ask the user to: open the app → Settings (gear) → **IPv6 prefix rules** → confirm the screen lists the 8 blanket rules (rmnet_data0-3 × 2409:40e3::/32 + 2409:4123::/32) → tap **Add rule**, type an iface with a space (`bad iface`) → confirm the inline error appears and **Save is disabled** → remove the bad rule → then reorder without changing the rule SET: delete the FIRST rule (rmnet_data0 / 2409:40e3:: / 32), tap Add rule, re-enter iface `rmnet_data0`, prefix `2409:40e3::`, len `32` (it lands at the END, so the list differs from the initial one and Save enables) → Save → confirm the "saved" snackbar.
+Ask the user to: open the app → Settings (gear) → **IPv6 prefix rules** → confirm the screen lists the 8 blanket rules (rmnet_data0-3 × 2409:40e3::/32 + 2409:4123::/32) → tap **Add rule**, type an iface with a space (`bad iface`) → tap **Save** → confirm the inline error appears on the iface field and NOTHING persists (the save bar validates on submit — quality-review change; the screen's snackbar must NOT show "saved") → remove the bad rule → then reorder without changing the rule SET: delete the FIRST rule (rmnet_data0 / 2409:40e3:: / 32), tap Add rule, re-enter iface `rmnet_data0`, prefix `2409:40e3::`, len `32` (it lands at the END, so the list differs from the initial one and Save enables) → Save → confirm the "saved" snackbar.
 
 Then capture evidence (read-only):
 
