@@ -38,6 +38,7 @@ class Ipv6PrefixRulesDataTest {
                 "fe80::1",
                 "::ffff:1.2.3.4",
                 "0:0:0:0:0:ffff:1.2.3.4",
+                "abcd::1.2.3.4",
                 "2001:db8:85a3:8d3:1319:8a2e:370:7348",
                 "1:2:3:4:5:6:7::",
                 "::1:2:3:4:5:6:7",
@@ -59,6 +60,8 @@ class Ipv6PrefixRulesDataTest {
                 "0:0:0:0:0:ffff:1.2.3.256",
                 "0:0:0:0:0:ffff:01.2.3.4",
                 "::ffff:1.2.3",
+                "1.2.3.4::",
+                "abcd:1.2.3.4::",
                 "2409:40e3::/32",
             )
         bad.forEach { assertFalse("expected invalid: $it", isValidIpv6Literal(it)) }

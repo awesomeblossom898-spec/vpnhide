@@ -78,6 +78,8 @@ internal fun isValidIpv6Literal(value: String): Boolean {
     if (compression >= 0 && value.indexOf("::", compression + 2) >= 0) return false
     val head = if (compression >= 0) value.substring(0, compression) else value
     val tail = if (compression >= 0) value.substring(compression + 2) else ""
+    // Rust parity: an embedded IPv4 quad must come from the tail, never the head.
+    if (compression >= 0 && head.contains('.')) return false
     val groups = (splitGroups(head) ?: return false) + (splitGroups(tail) ?: return false)
     var count = 0
     groups.forEachIndexed { index, group ->
