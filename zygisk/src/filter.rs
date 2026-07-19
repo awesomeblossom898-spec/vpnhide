@@ -27,6 +27,65 @@ pub fn is_vpn_iface_cstr(name: &CStr) -> bool {
     is_vpn_iface_bytes(name.to_bytes())
 }
 
+// ============================================================================
+//  Global IPv6 prefix rules (wire `prefix` record, protocol §4.3)
+// ============================================================================
+
+use vpnhide_protocol::PrefixRule;
+
+/// Backend cap, re-exported so the hook layer sizes its per-call resolve
+/// array without importing the protocol crate separately. Keep in sync with
+/// `MAX_PREFIX_RULES` in kmod/shared/vpnhide_logic.h.
+pub const MAX_PREFIX_RULES: usize = vpnhide_protocol::MAX_PREFIX_RULES;
+
+/// Bit-exact parity with C `vpnhide_prefix_match`
+/// (kmod/shared/vpnhide_logic.h): compare the full bytes, then the top `rem`
+/// bits of the boundary byte. `prefix_len` 0 matches every address; > 128
+/// never matches (defensive — the wire parser already caps at 128, like the
+/// C).
+pub fn prefix_match(addr: &[u8; 16], rule_addr: &[u8; 16], prefix_len: u8) -> bool {
+    if prefix_len > 128 {
+        return false;
+    }
+    let full = (prefix_len / 8) as usize;
+    let rem = prefix_len % 8;
+    if addr[..full] != rule_addr[..full] {
+        return false;
+    }
+    if rem != 0 {
+        let mask = 0xffu8 << (8 - rem);
+        if (addr[full] ^ rule_addr[full]) & mask != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when a rule names `ifname` (byte-exact; the caller has already
+/// NUL-trimmed) AND its prefix covers `addr`.
+pub fn prefix_rule_hit(rules: &[PrefixRule], ifname: &[u8], addr: &[u8; 16]) -> bool {
+    rules
+        .iter()
+        .any(|r| r.ifname.as_bytes() == ifname && prefix_match(addr, &r.addr, r.prefix_len))
+}
+
+/// Parse exactly 32 hex chars (any case) into 16 network-order bytes — the
+/// address-token shape in `/proc/net/if_inet6` and `/proc/net/ipv6_route`
+/// (the same 32-hex form as the wire `prefix` record).
+fn parse_addr32_hex(tok: &[u8]) -> Option<[u8; 16]> {
+    if tok.len() != 32 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    for (i, byte) in out.iter_mut().enumerate() {
+        // parse_hex_u32 on a 1-char slice yields that nibble (0 shl 4 | digit).
+        let hi = parse_hex_u32(&tok[2 * i..2 * i + 1])?;
+        let lo = parse_hex_u32(&tok[2 * i + 1..2 * i + 2])?;
+        *byte = ((hi as u8) << 4) | lo as u8;
+    }
+    Some(out)
+}
+
 /// Walk `data` line by line, keeping every line for which `hide(line)` is
 /// false and compacting the kept lines toward the front in place. Returns the
 /// new valid length.
@@ -674,5 +733,85 @@ tun0:  300    3    0    0\n"
         assert_eq!(new_len, make_route_nlmsg(0).len());
         assert_eq!(read_u16_ne(&buf, 4), Some(RTM_NEWROUTE));
         assert_eq!(read_u32_ne(&buf, ROUTE_OIF_OFF), Some(2));
+    }
+
+    fn rule(ifname: &str, addr: [u8; 16], plen: u8) -> PrefixRule {
+        PrefixRule {
+            ifname: ifname.to_string(),
+            addr,
+            prefix_len: plen,
+        }
+    }
+
+    #[test]
+    fn prefix_match_plen_zero_matches_everything() {
+        let any = [0xabu8; 16];
+        assert!(prefix_match(&any, &[0u8; 16], 0));
+        assert!(prefix_match(&[0u8; 16], &[0xffu8; 16], 0));
+    }
+
+    #[test]
+    fn prefix_match_boundary_byte_and_off_by_one() {
+        // 2409:40e3::/32 — the carrier blanket shape used on-device.
+        let rule_addr: [u8; 16] = [0x24, 0x09, 0x40, 0xe3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let mut inside = rule_addr;
+        inside[4] = 0xab; // first byte AFTER the /32 — must not matter
+        inside[15] = 0xff;
+        assert!(prefix_match(&inside, &rule_addr, 32));
+        let mut outside = rule_addr;
+        outside[3] ^= 0x01; // last bit of the boundary byte
+        assert!(!prefix_match(&outside, &rule_addr, 32));
+        outside = rule_addr;
+        outside[2] ^= 0x80; // first bit of byte 2 (inside the /32)
+        assert!(!prefix_match(&outside, &rule_addr, 32));
+    }
+
+    #[test]
+    fn prefix_match_non_byte_aligned_and_edges() {
+        let a: [u8; 16] = [0x24, 0x09, 0x40, 0xe3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        // /31: top 7 bits of byte 3 must match (0xe2 vs 0xe3 differ only in bit 0).
+        let mut b = a;
+        b[3] = 0xe2; // 0b1110_0010 — same top 7 bits as 0xe3
+        assert!(prefix_match(&b, &a, 31));
+        b[3] = 0xe1; // differs in bit 1 (inside the /31)
+        assert!(!prefix_match(&b, &a, 31));
+        // /128 exact, /127 last bit ignored.
+        assert!(prefix_match(&a, &a, 128));
+        let mut c = a;
+        c[15] = 1;
+        assert!(!prefix_match(&c, &a, 128));
+        assert!(prefix_match(&c, &a, 127));
+        // Defensive: > 128 never matches.
+        assert!(!prefix_match(&a, &a, 129));
+    }
+
+    #[test]
+    fn prefix_rule_hit_scopes_by_ifname() {
+        let rules = [rule(
+            "rmnet_data1",
+            [0x24, 0x09, 0x40, 0xe3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            32,
+        )];
+        let addr = [
+            0x24, 0x09, 0x40, 0xe3, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+        ];
+        assert!(prefix_rule_hit(&rules, b"rmnet_data1", &addr));
+        assert!(!prefix_rule_hit(&rules, b"rmnet_data3", &addr)); // same addr, other iface
+        assert!(!prefix_rule_hit(&rules, b"rmnet_data1", &[0x26u8; 16])); // not covered
+        assert!(!prefix_rule_hit(&[], b"rmnet_data1", &addr)); // empty rules
+    }
+
+    #[test]
+    fn parse_addr32_hex_shape() {
+        assert_eq!(
+            parse_addr32_hex(b"240940e3000000000000000000000000"),
+            Some([0x24, 0x09, 0x40, 0xe3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(
+            parse_addr32_hex(b"240940E3000000000000000000000000"), // case-liberal
+            Some([0x24, 0x09, 0x40, 0xe3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        );
+        assert_eq!(parse_addr32_hex(b"2409"), None); // short
+        assert_eq!(parse_addr32_hex(b"zz0940e3000000000000000000000000"), None);
     }
 }

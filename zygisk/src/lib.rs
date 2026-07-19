@@ -168,10 +168,14 @@ unsafe impl Sync for VpnHide {}
 ///
 /// `targets` carries one Zygisk-owned hook mask per target UID (protocol §4.3 —
 /// UID is the key on every channel, including Zygisk); `debug` is the folded
-/// debug flag.
+/// debug flag. `prefixes` carries the global IPv6 prefix rules; they apply
+/// only inside hooked (target-app) processes — which IS the kernel's
+/// reader-uid gate by construction: hooked uids are app uids >= 10000, and
+/// system_server is never specialized by this module.
 struct ZygiskConfig {
     targets: Vec<protocol::Target>,
     debug: bool,
+    prefixes: Vec<protocol::PrefixRule>,
 }
 
 static CACHED_CONFIG: std::sync::OnceLock<ZygiskConfig> = std::sync::OnceLock::new();
@@ -187,6 +191,7 @@ fn load_config_from_dir_fd(dir_fd: std::os::fd::RawFd) -> ZygiskConfig {
     let empty = ZygiskConfig {
         targets: Vec::new(),
         debug: false,
+        prefixes: Vec::new(),
     };
     let filename = std::ffi::CString::new(TARGETS_FILENAME).unwrap();
     let fd = unsafe { libc::openat(dir_fd, filename.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
@@ -204,20 +209,31 @@ fn load_config_from_dir_fd(dir_fd: std::os::fd::RawFd) -> ZygiskConfig {
         return empty;
     }
     match protocol::parse_config(&content) {
-        Some(cfg) => ZygiskConfig {
-            targets: cfg
-                .targets
-                .iter()
-                .filter_map(|t| {
-                    let hookmask = t.hookmask & ZYGISK_HOOK_MASK;
-                    (hookmask != 0).then_some(protocol::Target {
-                        uid: t.uid,
-                        hookmask,
+        Some(cfg) => {
+            let protocol::Config {
+                debug,
+                targets,
+                mut prefixes,
+            } = cfg;
+            // Defensive cap, same as the native parsers (the activator
+            // already truncates at 8; a hand-written snapshot could carry
+            // more).
+            prefixes.truncate(protocol::MAX_PREFIX_RULES);
+            ZygiskConfig {
+                targets: targets
+                    .iter()
+                    .filter_map(|t| {
+                        let hookmask = t.hookmask & ZYGISK_HOOK_MASK;
+                        (hookmask != 0).then_some(protocol::Target {
+                            uid: t.uid,
+                            hookmask,
+                        })
                     })
-                })
-                .collect(),
-            debug: cfg.debug.unwrap_or(false),
-        },
+                    .collect(),
+                debug: debug.unwrap_or(false),
+                prefixes,
+            }
+        }
         None => {
             // Rejected whole — bad/missing header, or a version newer than
             // this build knows (§3 version fuse). Fail closed.
@@ -249,8 +265,9 @@ impl ZygiskModule for VpnHide {
         // anything below logs. Default Off ⇒ silence on a fresh/empty install.
         set_log_level(cfg.debug);
         debug!(
-            "on_load: {} zygisk targets cached, debug={}",
+            "on_load: {} zygisk targets cached, {} prefix rules, debug={}",
             cfg.targets.len(),
+            cfg.prefixes.len(),
             cfg.debug
         );
         // dir_fd drops here → closed before any app fork.
@@ -615,6 +632,17 @@ fn target_hookmask(uid: u32) -> u32 {
             .unwrap_or(0),
         None => 0,
     }
+}
+
+/// The cached global prefix rules: empty until `on_load` parses targets.txt,
+/// and empty on parse failure (fail closed = no prefix filtering). Read-only
+/// after `on_load`, so hook threads race nothing — the `OnceLock` write in
+/// `on_load` happens-before `post_app_specialize` installs any hook.
+pub(crate) fn prefix_rules() -> &'static [protocol::PrefixRule] {
+    CACHED_CONFIG
+        .get()
+        .map(|cfg| cfg.prefixes.as_slice())
+        .unwrap_or(&[])
 }
 
 fn zygisk_hook_enabled(hookmask: u32, hook: Hook) -> bool {
