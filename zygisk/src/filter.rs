@@ -145,9 +145,18 @@ pub fn filter_route_buf(data: &mut [u8]) -> usize {
 }
 
 /// Filter `/proc/net/ipv6_route` in-place. Interface name is the LAST
-/// whitespace-delimited field on each line.
+/// whitespace-delimited field on each line; the route DESTINATION is the
+/// FIRST. Kept wrapper for the no-rules shape.
 pub fn filter_ipv6_route_buf(data: &mut [u8]) -> usize {
-    filter_by_last_field(data)
+    filter_ipv6_route_buf_ex(data, &[])
+}
+
+/// `ipv6_route` with global prefix rules (kernel `ipv6_route_seq_show`
+/// parity): a line also drops when its DESTINATION (first field — the
+/// route's own plen is never consulted) falls inside a rule prefix on the
+/// egress iface (last field).
+pub fn filter_ipv6_route_buf_ex(data: &mut [u8], rules: &[PrefixRule]) -> usize {
+    filter_by_last_field_ex(data, rules)
 }
 
 /// Filter `/proc/net/dev` in-place. Each data line is `  <iface>: <stats>`;
@@ -183,18 +192,53 @@ fn trim_ascii_ws(mut s: &[u8]) -> &[u8] {
 }
 
 /// Filter `/proc/net/if_inet6` in-place. Interface name is the LAST
-/// whitespace-delimited field on each line.
+/// whitespace-delimited field on each line. Kept wrapper for the no-rules
+/// shape.
 pub fn filter_if_inet6_buf(data: &mut [u8]) -> usize {
-    filter_by_last_field(data)
+    filter_if_inet6_buf_ex(data, &[])
+}
+
+/// `if_inet6` with global prefix rules (kernel `if6_seq_show` parity): a
+/// line also drops when its address (first field, 32 hex) falls inside a
+/// rule prefix on the iface (last field).
+pub fn filter_if_inet6_buf_ex(data: &mut [u8], rules: &[PrefixRule]) -> usize {
+    filter_by_last_field_ex(data, rules)
 }
 
 /// Shared logic: filter lines where the LAST whitespace-delimited field
-/// is a VPN interface name (used by ipv6_route and if_inet6).
+/// is a VPN interface name (used by ipv6_route and if_inet6). Kept wrapper.
 fn filter_by_last_field(data: &mut [u8]) -> usize {
+    filter_by_last_field_ex(data, &[])
+}
+
+/// Shared logic: last-field VPN-name filtering plus the global prefix-rule
+/// path (first-field address hit on a rule-named iface).
+fn filter_by_last_field_ex(data: &mut [u8], rules: &[PrefixRule]) -> usize {
     compact_lines(data, |line| {
         let ifname = extract_last_field(line);
-        !ifname.is_empty() && is_vpn_iface_bytes(ifname)
+        if !ifname.is_empty() && is_vpn_iface_bytes(ifname) {
+            return true;
+        }
+        first_field_addr_hit(line, ifname, rules)
     })
+}
+
+/// Prefix-rule check for the if_inet6/ipv6_route line shapes: parse the
+/// FIRST whitespace-delimited field as a 32-hex v6 address and test it
+/// against the rules naming `ifname`. Empty rules / empty ifname / a
+/// non-32-hex first field are all a cheap miss.
+fn first_field_addr_hit(line: &[u8], ifname: &[u8], rules: &[PrefixRule]) -> bool {
+    if rules.is_empty() || ifname.is_empty() {
+        return false;
+    }
+    let field_len = line
+        .iter()
+        .position(|&b| b == b' ' || b == b'\t' || b == b'\n')
+        .unwrap_or(line.len());
+    let Some(addr) = parse_addr32_hex(&line[..field_len]) else {
+        return false;
+    };
+    prefix_rule_hit(rules, ifname, &addr)
 }
 
 /// Extract the last whitespace-delimited field from a line (trimming
@@ -825,5 +869,69 @@ tun0:  300    3    0    0\n"
         // No on_load in host tests → the OnceLock is unset → fail-closed
         // empty rules (no prefix filtering).
         assert!(crate::prefix_rules().is_empty());
+    }
+
+    const PFX_RMNET1: [u8; 16] = [0x24, 0x09, 0x40, 0xe3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    #[test]
+    fn if_inet6_ex_drops_covered_addr_on_rule_iface() {
+        let rules = [rule("rmnet_data1", PFX_RMNET1, 32)];
+        let input = b"240940e3000000000000000000000001 00000005 40 00 00 rmnet_data1\n\
+                      24094123000000000000000000000001 00000007 40 00 00 rmnet_data3\n\
+                      fe800000000000000000000000000001 00000005 40 00 00 rmnet_data1\n";
+        let mut buf = input.to_vec();
+        let n = filter_if_inet6_buf_ex(&mut buf, &rules);
+        let out = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(
+            !out.contains("240940e3"),
+            "covered addr on rule iface dropped"
+        );
+        assert!(
+            out.contains("24094123"),
+            "other iface kept (rules scope by name)"
+        );
+        assert!(
+            out.contains("fe800000"),
+            "link-local kept (not covered by /32)"
+        );
+    }
+
+    #[test]
+    fn if_inet6_no_rules_is_byte_identical() {
+        let input = b"240940e3000000000000000000000001 00000005 40 00 00 rmnet_data1\n";
+        let mut buf = input.to_vec();
+        let n = filter_if_inet6_buf_ex(&mut buf, &[]);
+        assert_eq!(&buf[..n], input);
+    }
+
+    #[test]
+    fn ipv6_route_ex_drops_covered_destination_keeps_defaults() {
+        let rules = [rule("rmnet_data1", PFX_RMNET1, 32)];
+        let input = b"240940e3000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001 rmnet_data1\n\
+                      00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00000001 rmnet_data1\n\
+                      fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001 rmnet_data1\n";
+        let mut buf = input.to_vec();
+        let n = filter_ipv6_route_buf_ex(&mut buf, &rules);
+        let out = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(!out.contains("240940e3"), "covered destination dropped");
+        assert!(
+            out.contains("00000000000000000000000000000000 00"),
+            "default ::/0 kept — not inside a /32"
+        );
+        assert!(out.contains("fe800000"), "fe80 kept");
+    }
+
+    #[test]
+    fn ipv6_route_ex_plen_zero_rule_covers_default() {
+        // C parity: plen 0 matches every destination on the rule iface,
+        // including ::/0. The route line's own plen field is never consulted.
+        let rules = [rule("rmnet_data1", [0u8; 16], 0)];
+        let input = b"00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00000001 rmnet_data1\n\
+                      00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000400 00000000 00000000 00000001 rmnet_data3\n";
+        let mut buf = input.to_vec();
+        let n = filter_ipv6_route_buf_ex(&mut buf, &rules);
+        let out = core::str::from_utf8(&buf[..n]).unwrap();
+        assert!(out.contains("rmnet_data3"));
+        assert!(!out.contains("rmnet_data1"));
     }
 }

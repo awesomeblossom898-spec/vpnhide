@@ -697,10 +697,11 @@ unsafe fn open_filtered_proc_net(
 fn apply_filter(data: &mut [u8], kind: ProcNetFile) -> usize {
     use crate::filter::*;
 
+    let rules = crate::prefix_rules();
     match kind {
         ProcNetFile::Route => filter_route_buf(data),
-        ProcNetFile::Ipv6Route => filter_ipv6_route_buf(data),
-        ProcNetFile::IfInet6 => filter_if_inet6_buf(data),
+        ProcNetFile::Ipv6Route => filter_ipv6_route_buf_ex(data, rules),
+        ProcNetFile::IfInet6 => filter_if_inet6_buf_ex(data, rules),
         ProcNetFile::Tcp => {
             let (addrs4, n4, _, _) = collect_vpn_addrs();
             filter_tcp4_buf(data, &addrs4, n4)
