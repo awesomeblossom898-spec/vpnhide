@@ -44,6 +44,7 @@ jobs:
       matrix:
         kmi:
           - android12-5.10
+          - android13-5.15
           - android16-6.12
     # Public third-party DDK image (no credentials needed) — mirrors the stock
     # ci.yml kmod job. Tag mirrors DDK_IMAGE_TAG in kmod/build.py.
