@@ -257,6 +257,18 @@ native (or vice versa) is precisely the cross-layer contradiction a detector
 probes for. Untargeted apps get a rewrite-only pass (no VPN scrub); root and
 system readers always see the truth.
 
+Consistency is exact on the `.ko`, whose reader-uid gate the framework gate
+mirrors one-for-one. On the degrade-profile backends the picture is strictly
+*better than the hide-only status quo* but not exact: KPM hides v6 natively
+and skips `prefix4`, Zygisk hides v6 (its filters never read `fake`) and
+skips `prefix4` — so there the framework answer (the configured fake) and
+the native answer (hidden, or real for v4) can differ in kind, though the
+real address at least stops leaking via the framework. Full cross-layer
+parity for KPM/Zygisk means teaching them the in-place rewrite (KPM needs a
+per-KMI-verifiable `skb->data` offset; Zygisk needs the same rtattr walk in
+its netlink filters); until then the `.ko` is the only fully-consistent
+backend for rewrite rules.
+
 ### 3E. Package visibility — "is the VPN-manager app installed?"
 
 lsposed-only, in `PackageVisibilityHooks.kt`, filtering `IPackageManagerBase`
