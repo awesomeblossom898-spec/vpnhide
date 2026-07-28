@@ -165,6 +165,37 @@ cover all candidate ifaces (e.g. `rmnet_data0`-`rmnet_data3`). Per-iface
 scoping keeps IMS safe: the IMS /32 differs from the internet /32, so a
 blanket internet-prefix rule never touches IMS addresses.
 
+Each `ipv6PrefixRules` entry also takes an optional **mode**:
+`{ "iface", "prefix", "prefixLen", "mode"?, "fake"? }`. `mode` is `"hide"`
+(default — key omitted) or `"rewrite"`. In rewrite mode `fake` is **required**:
+a full concrete IPv6 address in colon notation that must keep the rule
+prefix's top `prefixLen` bits (e.g. rule `2401:4900::/32` → fake
+`2401:4900:7f3a:9c21:...`). Instead of dropping matching addresses, every
+reader-gated path then shows the fake — netlink, `/proc`, getifaddrs, and the
+framework `LinkProperties` alike. Consistency is the security property: all
+read paths must agree, so the fake is configured once (the app generates it
+with a CSPRNG at edit time) and stored here, never randomized per read. A
+`hide` entry must not carry `fake`; `rewrite` without `fake`, a fake outside
+the rule prefix, or `fake` on a hide entry are all malformed — the activator
+rejects the write, best-effort readers skip the entry. Non-default keys are
+emitted only when set, so hide entries stay byte-identical to the pre-rewrite
+schema.
+
+`ipv4Rules` (optional, top-level) holds the IPv4 siblings — **rewrite-only**,
+because hiding the device's only v4 address would wedge networking. Each entry
+is `{ "iface", "prefix", "prefixLen", "fake" }`: `prefix`/`fake` in dotted
+quad, `prefixLen` 0..32, `fake` required and contained in the rule prefix. At
+most 4 rules (activator warns and truncates beyond that). The intended use is
+CGNAT blinding on cellular: `{ "iface": "ccmni1", "prefix": "100.64.0.0",
+"prefixLen": 10, "fake": "100.87.23.45" }` shows apps a different address
+inside the same carrier-grade range — never an RFC1918 address, which would
+be a detection signal of its own on a cellular interface. The same reader-uid
+gate applies (apps + shell see the fake; root/system/telephony see the truth,
+so IMS/VoLTE provisioning is untouched). v4 routes are **not** rewritten (the
+CGNAT range is shared-carrier infrastructure; route-dst correlation is a v6
+concern only, handled there by composing the fake's top 64 bits with the
+original route destination's low 64 bits).
+
 ---
 
 ## 3. Java layer (LSPosed) — independent, self-reading

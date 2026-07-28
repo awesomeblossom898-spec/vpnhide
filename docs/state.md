@@ -22,6 +22,13 @@ The single managed desired-state file.
   roles }`, `settings.rememberSuperkey: Boolean`,
   `settings.autoHideVpnServices: Boolean`, `settings.autoHideVpnName: Boolean`,
   `settings.autoHiddenPackages: [package]`.
+- Global prefix rules live here too: `ipv6PrefixRules: [{ iface, prefix,
+  prefixLen, mode?, fake? }]` (`mode` `"hide"` default | `"rewrite"` with a
+  required contained `fake`) and `ipv4Rules: [{ iface, prefix, prefixLen,
+  fake }]` (rewrite-only). The configured fakes are the entire rewrite state —
+  no per-read randomness, no extra files, no new paths anywhere in this
+  document; delivery reuses the existing activator → wire → backend channels
+  (protocol.md §4.3 `prefix`/`prefix4` records).
 - Roles per package: `java`, `native` (`Boolean` or hook-name array),
   `appHiding`, `ports`, and the app-owned extension `hidden`.
 - Writer: VPN Hide app via `su` (`StorageConfig.kt`) on Save, startup

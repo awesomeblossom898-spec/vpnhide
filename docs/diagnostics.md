@@ -33,6 +33,15 @@ diffs them:
 | VPN | ok, clean | **HiddenByBackend** |
 | — | app saw VPN | **Leak** |
 
+Rewrite-mode prefix rules slot into the same table: the classifier compares
+*values*, not just presence. Root reads the real covered address; the app
+reading the **configured fake** for that rule means a backend rewrote the view
+— **HiddenByBackend**, identical in kind to a hidden rule's empty app read.
+The app reading the **real** covered address is a **Leak** (the rule failed to
+take, whatever the mode). This is also why the fake is a fixed configured
+value: a per-read random fake would be indistinguishable from a
+cross-path leak by any differential check, ours included.
+
 Priority: an empty ground truth is checked **before** EACCES — if root sees nothing,
 the SELinux block is moot, it is simply nothing-to-leak.
 

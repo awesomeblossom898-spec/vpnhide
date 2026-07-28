@@ -208,6 +208,27 @@ rules, uid-gated); KPM still does **not** hook it. `tcp4_seq_show` and
 procfs equivalents still leak under a raw-syscall reader that SELinux happens
 to allow. Candidate kernel-backend work if a real detector uses them.
 
+**Address rewrite (fake) — same gates, same hooks, different verdict.** A
+prefix rule in `rewrite` mode substitutes a configured fake for the covered
+address instead of dropping it, on every reader-gated path the hide mode
+covers: `inet6_fill_ifaddr`/`inet_fill_ifaddr` (netlink RTM_GETADDR v6+v4),
+`if6_seq_show` (`/proc/net/if_inet6`), and — for v6 — route destinations via
+`rt6_fill_node` + `/proc/net/ipv6_route`, where the rewritten dst keeps the
+fake's top 64 bits over the original low 64 so address↔route correlation
+still checks out. v4 rules (`prefix4`) are rewrite-only and cover the
+cellular CGNAT case (fake stays inside 100.64.0.0/10 — an RFC1918 answer on
+a cellular iface would itself be a tell). The substitution is length-preserving
+by construction (16B/4B binary in netlink, exactly 32 hex chars in procfs), so
+no buffer accounting changes anywhere. On KPM the v6 rewrite **degrades to
+hide** (no `skb->data` offset is verifiable per-KMI for the in-place edit) and
+`prefix4` is inert — a deliberate fail-consistent profile: an app sees either
+the fake everywhere or nothing anywhere, never a mix. Accepted residuals,
+unchanged from hide mode: `getsockname` on an already-bound socket,
+`/proc/net/tcp*` (above), single-shot `rt_fill_info` (intentionally unhooked),
+KPM's `if_inet6` gap (the address simply stays visible there — same as hide
+mode today), and `RTA_MULTIPATH` nexthop payloads (no Android carrier uses
+multipath on device routes).
+
 ### 3D. Framework network APIs (Java) — lsposed territory
 
 All `system_server` Binder results, sanitized before they reach the app. Native
@@ -223,6 +244,18 @@ summary:
 | Legacy VPN type | `getNetworkInfo(TYPE_VPN)` / `getNetworkForType(TYPE_VPN)` | return `null`; otherwise disguise `NetworkInfo` `TYPE_VPN`→`TYPE_WIFI` |
 | Interface name / routes / DNS | `LinkProperties.{getInterfaceName,getRoutes,getDnsServers}` | null `mIfaceName`, filter `mRoutes`, recurse into stacked links |
 | Async push | `registerDefaultNetworkCallback()` / `registerNetworkCallback()` | suppress VPN-requested callbacks; stash recipient UID across dispatch (issue #70) |
+
+The same layer applies the **address rewrite** on the framework path:
+`system_server` self-reads the canonical rules (fakes resolved to bytes once
+at load) and swaps matching `LinkAddress` entries for the configured fake in
+every `LinkProperties` it hands out — sync results, callback bundles, and the
+`writeToParcel` marshalling path, stacked links included. The gate is
+**global** (uid ≥ 10000 + shell), deliberately wider than the per-target VPN
+scrub: the native layer shows the fake to every app, so the framework must
+show it to every app too — a single app seeing real-via-Java and fake-via-
+native (or vice versa) is precisely the cross-layer contradiction a detector
+probes for. Untargeted apps get a rewrite-only pass (no VPN scrub); root and
+system readers always see the truth.
 
 ### 3E. Package visibility — "is the VPN-manager app installed?"
 
