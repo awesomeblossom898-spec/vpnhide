@@ -14,6 +14,7 @@ internal data class CanonicalConfig(
     val apps: Map<String, CanonicalApp> = emptyMap(),
     val settings: CanonicalSettings = CanonicalSettings(),
     val ipv6PrefixRules: List<CanonicalIpv6PrefixRule> = emptyList(),
+    val ipv4Rules: List<CanonicalIpv4Rule> = emptyList(),
 )
 
 internal data class CanonicalSettings(
@@ -22,12 +23,6 @@ internal data class CanonicalSettings(
     val autoHideVpnName: Boolean = false,
     val autoHideExcludedPackages: Set<String> = emptySet(),
     val autoHiddenPackages: Set<String> = emptySet(),
-)
-
-internal data class CanonicalIpv6PrefixRule(
-    val iface: String,
-    val prefix: String,
-    val prefixLen: Int,
 )
 
 internal data class CanonicalApp(
@@ -162,6 +157,7 @@ internal fun parseCanonicalConfig(raw: String): CanonicalConfig? {
                 autoHiddenPackages = parseStringSet(settingsJson?.optJSONArray("autoHiddenPackages")),
             ),
         ipv6PrefixRules = parseIpv6PrefixRules(root),
+        ipv4Rules = parseIpv4Rules(root),
     )
 }
 
@@ -216,26 +212,6 @@ private fun parsePortRule(obj: JSONObject): PortRule {
         start = start,
         end = end,
     )
-}
-
-private fun parseIpv6PrefixRules(root: JSONObject): List<CanonicalIpv6PrefixRule> {
-    val array = root.optJSONArray("ipv6PrefixRules") ?: return emptyList()
-    // Best-effort, same philosophy as parsePortPolicy: one malformed entry must
-    // not throw and unwind the WHOLE canonical config — skip it and keep the
-    // valid siblings. Strict validation (IPv6-ness, printable-ASCII iface) is
-    // the activator's job at projection time, not the writer's.
-    return (0 until array.length()).mapNotNull { idx ->
-        val obj = array.optJSONObject(idx) ?: return@mapNotNull null
-        runCatching {
-            val iface = obj.optString("iface", "")
-            val prefix = obj.optString("prefix", "")
-            val prefixLen = obj.optInt("prefixLen", -1)
-            require(iface.isNotBlank() && iface.length < 16) { "bad iface" }
-            require(prefix.isNotBlank()) { "bad prefix" }
-            require(prefixLen in 0..128) { "bad prefixLen" }
-            CanonicalIpv6PrefixRule(iface, prefix, prefixLen)
-        }.getOrNull()
-    }
 }
 
 private fun parseNativeRole(value: Any?): NativeRole =
@@ -346,6 +322,7 @@ internal fun buildCanonicalConfig(
         apps = apps,
         settings = existing?.settings ?: CanonicalSettings(),
         ipv6PrefixRules = existing?.ipv6PrefixRules ?: emptyList(),
+        ipv4Rules = existing?.ipv4Rules ?: emptyList(),
     )
 }
 
@@ -406,6 +383,9 @@ internal fun canonicalConfigJson(config: CanonicalConfig): String =
         if (config.ipv6PrefixRules.isNotEmpty()) {
             appendIpv6PrefixRules(config.ipv6PrefixRules)
         }
+        if (config.ipv4Rules.isNotEmpty()) {
+            appendIpv4Rules(config.ipv4Rules)
+        }
         append("  \"apps\": {")
         val apps = config.apps.toSortedMap().filterValues { it.hasAnyRole }
         if (apps.isNotEmpty()) append('\n')
@@ -443,22 +423,6 @@ internal fun canonicalConfigJson(config: CanonicalConfig): String =
         append("  }\n")
         append("}\n")
     }
-
-private fun StringBuilder.appendIpv6PrefixRules(rules: List<CanonicalIpv6PrefixRule>) {
-    append("  \"ipv6PrefixRules\": [\n")
-    rules.forEachIndexed { index, rule ->
-        append("    { \"iface\": ")
-        appendJsonString(rule.iface)
-        append(", \"prefix\": ")
-        appendJsonString(rule.prefix)
-        append(", \"prefixLen\": ")
-        append(rule.prefixLen)
-        append(" }")
-        if (index != rules.size - 1) append(',')
-        append('\n')
-    }
-    append("  ],\n")
-}
 
 private fun StringBuilder.appendCanonicalApp(app: CanonicalApp) {
     append("{ ")
@@ -554,7 +518,7 @@ private fun StringBuilder.appendStringArray(values: List<String>) {
     append(']')
 }
 
-private fun StringBuilder.appendJsonString(value: String) {
+internal fun StringBuilder.appendJsonString(value: String) {
     append('"')
     value.forEach { ch ->
         when (ch) {

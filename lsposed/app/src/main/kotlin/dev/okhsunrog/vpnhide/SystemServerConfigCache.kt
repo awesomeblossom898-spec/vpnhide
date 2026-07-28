@@ -10,6 +10,9 @@ internal data class SystemServerConfig(
     val hiddenPackages: Set<String> = emptySet(),
     val packageAppIds: Map<String, Int> = emptyMap(),
     val debug: Boolean = false,
+    // Address-rewrite rules (v6 rewrite + v4, fakes resolved to bytes at load
+    // time). Global scope — gated by uid, not by target membership.
+    val prefixRewriteRules: List<PrefixRewriteRule> = emptyList(),
 ) {
     val javaTargetAppIds: Set<Int>
         get() = javaTargetHookMasksByAppId.keys
@@ -80,7 +83,8 @@ internal object SystemServerConfigCache {
             HookLog.i(
                 "VpnHide: system_server config loaded " +
                     "java=${result.javaTargetAppIds.size} observer=${result.observerAppIds.size} " +
-                    "hidden=${result.hiddenPackages.size} debug=${result.debug}",
+                    "hidden=${result.hiddenPackages.size} rewrite=${result.prefixRewriteRules.size} " +
+                    "debug=${result.debug}",
             )
             cache = Cache(loadedFingerprint, result, nextStatCheck(lockedNow))
             return result
@@ -107,6 +111,13 @@ internal object SystemServerConfigCache {
     }
 
     fun appId(uid: Int): Int = uid % USER_ID_MODULO
+
+    /** The address-rewrite gate: GLOBAL, mirroring the kernel reader-uid gate
+     * (uid >= 10000 || shell). Per-app gating would let an untargeted app see
+     * the fake natively but the real address via LinkProperties — a within-app
+     * contradiction, which is itself a detection vector. Root/system see truth. */
+    fun isRewriteUid(uid: Int): Boolean =
+        uid >= android.os.Process.FIRST_APPLICATION_UID || uid == android.os.Process.SHELL_UID
 
     private fun Cache.withNextCheck(now: Long): Cache = copy(nextStatCheckUptimeMs = nextStatCheck(now))
 
@@ -136,12 +147,19 @@ internal object SystemServerConfigCache {
                     .keys
                     .resolveAppIds(packageAppIds)
             val hidden = canonical.apps.filterValues { it.hidden }.keys
+            // Resolve fakes to bytes ONCE here — the hook path only walks
+            // pre-parsed rules (PrefixRewriteRule.fakeFor), no string parsing
+            // per query.
+            val rewriteRules =
+                canonical.ipv6PrefixRules.mapNotNull { it.toRewriteRuleOrNull() } +
+                    canonical.ipv4Rules.mapNotNull { it.toRewriteRuleOrNull() }
             SystemServerConfig(
                 javaTargetHookMasksByAppId = javaTargetHookMasks,
                 observerAppIds = observers,
                 hiddenPackages = hidden,
                 packageAppIds = packageAppIds,
                 debug = canonical.debug,
+                prefixRewriteRules = rewriteRules,
             )
         } catch (t: Throwable) {
             HookLog.e("VpnHide: failed to read canonical config: ${t.message}")

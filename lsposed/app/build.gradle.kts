@@ -67,7 +67,7 @@ val kotlinSourceLineBudgets =
     mapOf(
         "DashboardData.kt" to 1789,
         "DashboardScreen.kt" to 1335,
-        "HookEntry.kt" to 1276,
+        "HookEntry.kt" to 1178,
         "SettingsScreen.kt" to 1201,
         "StatisticsScreen.kt" to 1102,
         "AppPickerScreen.kt" to 940,

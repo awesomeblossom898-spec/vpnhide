@@ -17,7 +17,6 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import dev.okhsunrog.vpnhide.generated.HookIds
-import dev.okhsunrog.vpnhide.generated.IfaceLists
 import java.util.concurrent.atomic.AtomicBoolean
 import java.lang.reflect.Array as JavaArray
 
@@ -156,131 +155,7 @@ class HookEntry : IXposedHookLoadPackage {
     //  Helpers
     // ------------------------------------------------------------------
 
-    private fun isVpnInterfaceName(name: String): Boolean = IfaceLists.isVpnIface(name)
-
     private fun hookBit(hook: HookIds.Hook): Int = 1 shl hook.id
-
-    // Recursively sanitizes mIfaceName + mRoutes + nested mStackedLinks; the
-    // length and nesting are inherent to walking that object graph by reflection.
-    // Still private-field-based (unlike sanitizeNetworkCapabilities, which moved
-    // to public mutators after Android 17 renamed NC's private fields). LP's
-    // fields are stable so far; if a future Android renames mIfaceName/mRoutes/
-    // mStackedLinks, migrate this to the public LinkProperties API
-    // (setInterfaceName(null) / setLinkAddresses / setRoutes / setDnsServers)
-    // the same way NC was done, and drop LP from the install-time smoke-check.
-    private fun sanitizeLinkProperties(copy: LinkProperties): Boolean {
-        var modified = false
-
-        val ifaceName = XposedHelpers.getObjectField(copy, "mIfaceName") as? String
-        val isVpnLp = ifaceName != null && isVpnInterfaceName(ifaceName)
-        if (isVpnLp) {
-            XposedHelpers.setObjectField(copy, "mIfaceName", null)
-            modified = true
-        }
-
-        // mLinkAddresses (the tunnel's assigned IP) and mDnses (the VPN's DNS
-        // servers) carry no interface tag, so they can only be scrubbed when the
-        // whole LinkProperties is a VPN one. Leaving them let an app read the
-        // VPN's tunnel address / DNS straight back via getLinkAddresses() /
-        // getDnsServers(). Clear both for a VPN LP (the routes/iface above are
-        // already handled).
-        if (isVpnLp) {
-            if (clearLinkPropertyList(copy, "mLinkAddresses")) modified = true
-            if (clearLinkPropertyList(copy, "mDnses")) modified = true
-        }
-
-        if (sanitizeLinkRoutes(copy)) modified = true
-        if (sanitizeStackedLinks(copy)) modified = true
-
-        return modified
-    }
-
-    /** Remove routes whose interface is a VPN tunnel. Returns true if any went. */
-    private fun sanitizeLinkRoutes(copy: LinkProperties): Boolean {
-        try {
-            @Suppress("UNCHECKED_CAST")
-            val routesField = XposedHelpers.getObjectField(copy, "mRoutes") as? MutableList<RouteInfo> ?: return false
-            val filtered =
-                routesField.filterNot { route ->
-                    val routeIface = route.`interface`
-                    routeIface != null && isVpnInterfaceName(routeIface)
-                }
-            if (filtered.size != routesField.size) {
-                routesField.clear()
-                routesField.addAll(filtered)
-                return true
-            }
-        } catch (t: Throwable) {
-            HookLog.e("VpnHide: failed to sanitize mRoutes: ${t.message}")
-        }
-        return false
-    }
-
-    /** Recursively sanitize stacked LinkProperties, dropping ones that become
-     *  empty VPN tunnels. Returns true if anything changed. */
-    @Suppress("NestedBlockDepth") // try-inside-for-inside-if-else over the stacked-LP map is structurally unavoidable
-    private fun sanitizeStackedLinks(copy: LinkProperties): Boolean {
-        var modified = false
-        try {
-            @Suppress("UNCHECKED_CAST")
-            val stacked = XposedHelpers.getObjectField(copy, "mStackedLinks") as? MutableMap<String, LinkProperties>
-            if (stacked != null && stacked.isNotEmpty()) {
-                val filtered = LinkedHashMap<String, LinkProperties>()
-                for ((key, value) in stacked) {
-                    val stackedCopy = cloneLinkProperties(value)
-                    val stackedModified = sanitizeLinkProperties(stackedCopy)
-                    val stackedIface = XposedHelpers.getObjectField(stackedCopy, "mIfaceName") as? String
-                    if (stackedIface == null && stackedCopy.routes.isEmpty()) {
-                        if (stackedModified || isVpnInterfaceName(key)) {
-                            modified = true
-                        } else {
-                            filtered[key] = stackedCopy
-                        }
-                    } else {
-                        if (stackedModified) modified = true
-                        filtered[key] = stackedCopy
-                    }
-                }
-                if (filtered.size != stacked.size || modified) {
-                    stacked.clear()
-                    stacked.putAll(filtered)
-                }
-            }
-        } catch (t: Throwable) {
-            HookLog.e("VpnHide: failed to sanitize mStackedLinks: ${t.message}")
-        }
-        return modified
-    }
-
-    /** Deep-copy a LinkProperties via its copy constructor, falling back to the
-     *  original on any reflection failure. */
-    private fun cloneLinkProperties(value: LinkProperties): LinkProperties =
-        try {
-            val ctor = LinkProperties::class.java.getDeclaredConstructor(LinkProperties::class.java)
-            ctor.isAccessible = true
-            ctor.newInstance(value) as LinkProperties
-        } catch (_: Throwable) {
-            value
-        }
-
-    /** Clear a `MutableList` field on a LinkProperties by reflection; returns
-     *  true if it had entries that were removed. */
-    private fun clearLinkPropertyList(
-        copy: LinkProperties,
-        field: String,
-    ): Boolean =
-        try {
-            val list = XposedHelpers.getObjectField(copy, field) as? MutableList<*>
-            if (!list.isNullOrEmpty()) {
-                list.clear()
-                true
-            } else {
-                false
-            }
-        } catch (t: Throwable) {
-            HookLog.e("VpnHide: failed to clear $field: ${t.message}")
-            false
-        }
 
     private fun sanitizeNetworkCapabilities(copy: NetworkCapabilities): Boolean {
         val hasVpnTransport = copy.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
@@ -427,13 +302,6 @@ class HookEntry : IXposedHookLoadPackage {
         return if (sanitizeNetworkCapabilities(copy)) copy else nc
     }
 
-    private fun sanitizedLinkProperties(lp: LinkProperties): LinkProperties {
-        val ctor = LinkProperties::class.java.getDeclaredConstructor(LinkProperties::class.java)
-        ctor.isAccessible = true
-        val copy = ctor.newInstance(lp) as LinkProperties
-        return if (sanitizeLinkProperties(copy)) copy else lp
-    }
-
     // NetworkInfo is legacy/deprecated and its fields have been stable, so this
     // still copies mNetworkType/mState/mDetailedState/mIsAvailable by reflection
     // (guarded by the install-time smoke-check). If a future Android renames
@@ -464,7 +332,7 @@ class HookEntry : IXposedHookLoadPackage {
     private fun sanitizedValue(value: Any?): Any? =
         when (value) {
             is NetworkCapabilities -> sanitizedNetworkCapabilities(value)
-            is LinkProperties -> sanitizedLinkProperties(value)
+            is LinkProperties -> sanitizedLinkProperties(value, effectiveCallerUid())
             is NetworkInfo -> sanitizedNetworkInfo(value)
             is Array<*> -> sanitizedArray(value)
             else -> value
@@ -494,10 +362,15 @@ class HookEntry : IXposedHookLoadPackage {
         explicitUid: Int? = null,
     ) {
         if (bypassConnectivitySanitize.get() == true) return
-        if (!isTargetCallerOrUid(HookIds.Hook.LSPOSED_CONNECTIVITY_RESULT, explicitUid)) return
+        val targeted = isTargetCallerOrUid(HookIds.Hook.LSPOSED_CONNECTIVITY_RESULT, explicitUid)
+        // Untargeted callers still get the rewrite pass: their native reads
+        // already show the fake, so the framework result must agree.
+        val rewriteOnly = !targeted && rewriteAppliesTo(effectiveCallerUid())
+        if (!targeted && !rewriteOnly) return
         try {
             val original = param.result
-            val sanitized = sanitizedValue(original)
+            val sanitized =
+                if (targeted) sanitizedValue(original) else rewriteOnlyValue(original, effectiveCallerUid())
             if (sanitized !== original) {
                 param.result = sanitized
                 LsposedStats.record(explicitUid ?: effectiveCallerUid(), HookIds.Hook.LSPOSED_CONNECTIVITY_RESULT)
@@ -508,7 +381,10 @@ class HookEntry : IXposedHookLoadPackage {
     }
 
     @Suppress("DEPRECATION")
-    private fun sanitizeCallbackBundle(bundle: Bundle): Boolean {
+    private fun sanitizeCallbackBundle(
+        bundle: Bundle,
+        recipientUid: Int? = null,
+    ): Boolean {
         var modified = false
         try {
             val nc = bundle.getParcelable(NetworkCapabilities::class.java.simpleName) as? NetworkCapabilities
@@ -521,7 +397,7 @@ class HookEntry : IXposedHookLoadPackage {
             }
             val lp = bundle.getParcelable(LinkProperties::class.java.simpleName) as? LinkProperties
             if (lp != null) {
-                val sanitized = sanitizedLinkProperties(lp)
+                val sanitized = sanitizedLinkProperties(lp, recipientUid ?: effectiveCallerUid())
                 if (sanitized !== lp) {
                     bundle.putParcelable(LinkProperties::class.java.simpleName, sanitized)
                     modified = true
@@ -785,12 +661,21 @@ class HookEntry : IXposedHookLoadPackage {
                     val lp = param.thisObject as LinkProperties
                     val ifname = XposedHelpers.getObjectField(lp, "mIfaceName") as? String
                     HookLog.i("VpnHide-LP: uid=$callerUid target=$isTarget ifname=$ifname")
-                    if (!isTarget) return
+                    // Untargeted callers skip the VPN scrub but not the rewrite
+                    // pass — parity with what the native layer shows them.
+                    val rewriteOnly = !isTarget && rewriteAppliesTo(callerUid)
+                    if (!isTarget && !rewriteOnly) return
                     try {
                         val ctor = LinkProperties::class.java.getDeclaredConstructor(LinkProperties::class.java)
                         ctor.isAccessible = true
                         val copy = ctor.newInstance(lp) as LinkProperties
-                        if (!sanitizeLinkProperties(copy)) return
+                        val modified =
+                            if (isTarget) {
+                                sanitizeLinkProperties(copy, callerUid)
+                            } else {
+                                rewriteLinkAddresses(copy, callerUid)
+                            }
+                        if (!modified) return
 
                         val parcel = param.args[0] as android.os.Parcel
                         val flags = param.args[1] as Int
@@ -802,7 +687,11 @@ class HookEntry : IXposedHookLoadPackage {
                         }
                         param.result = null
                         LsposedStats.record(callerUid, HookIds.Hook.LSPOSED_LINK_PROPERTIES)
-                        HookLog.i("VpnHide-LP: uid=$callerUid STRIPPED VPN (ifname was $ifname)")
+                        if (isTarget) {
+                            HookLog.i("VpnHide-LP: uid=$callerUid STRIPPED VPN (ifname was $ifname)")
+                        } else {
+                            HookLog.i("VpnHide-LP: uid=$callerUid rewrote address (ifname $ifname)")
+                        }
                     } catch (t: Throwable) {
                         HookLog.e("VpnHide: LP.writeToParcel error: ${t.message}")
                     }
@@ -1018,7 +907,20 @@ class HookEntry : IXposedHookLoadPackage {
                     val nri = param.args.firstOrNull() ?: return
                     rememberConnectivityService(param.thisObject)
                     val uid = extractRecipientUid(nri)
-                    if (uid < 0 || !isTargetUid(uid, HookIds.Hook.LSPOSED_CONNECTIVITY_CALLBACK)) return
+                    if (uid < 0) return
+                    if (!isTargetUid(uid, HookIds.Hook.LSPOSED_CONNECTIVITY_CALLBACK)) {
+                        // Not a hide target: no VPN scrub — but the rewrite pass
+                        // still applies, or the pushed LP would leak the real
+                        // address this app never sees natively.
+                        if (rewriteAppliesTo(uid)) {
+                            (param.args.getOrNull(CALLBACK_BUNDLE_ARG_INDEX) as? Bundle)?.let { bundle ->
+                                if (rewriteBundleLinkProperties(bundle, uid)) {
+                                    LsposedStats.record(uid, HookIds.Hook.LSPOSED_CONNECTIVITY_CALLBACK)
+                                }
+                            }
+                        }
+                        return
+                    }
 
                     val request = extractNetworkRequest(nri)
                     if (request != null && request.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
@@ -1030,7 +932,7 @@ class HookEntry : IXposedHookLoadPackage {
                         return
                     }
                     (param.args.getOrNull(CALLBACK_BUNDLE_ARG_INDEX) as? Bundle)?.let {
-                        if (sanitizeCallbackBundle(it)) {
+                        if (sanitizeCallbackBundle(it, uid)) {
                             LsposedStats.record(uid, HookIds.Hook.LSPOSED_CONNECTIVITY_CALLBACK)
                         }
                     }
