@@ -13,6 +13,8 @@ pub struct CanonicalConfig {
     pub settings: Settings,
     #[serde(default)]
     pub ipv6_prefix_rules: Vec<Ipv6PrefixRule>,
+    #[serde(default)]
+    pub ipv4_rules: Vec<Ipv4Rule>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -22,12 +24,42 @@ pub struct Settings {
     pub remember_superkey: bool,
 }
 
+/// Per-rule disposition (§4.3): `hide` drops the matching address (today's
+/// behavior, the default so old configs parse unchanged); `rewrite` shows the
+/// configured `fake` instead. The wire carries no mode token — the activator
+/// folds mode into the optional fourth `<fake32hex>` token's presence.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RuleMode {
+    #[default]
+    Hide,
+    Rewrite,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Ipv6PrefixRule {
     pub iface: String,
     pub prefix: String,
     pub prefix_len: u8,
+    #[serde(default)]
+    pub mode: RuleMode,
+    /// Rewrite target. Required iff `mode == "rewrite"`; must keep the rule's
+    /// prefix (first `prefixLen` bits equal) — validated in parse_canonical.
+    #[serde(default)]
+    pub fake: Option<String>,
+}
+
+/// One IPv4 CGNAT-style rewrite rule (`ipv4Rules`, §4.3 `prefix4`). Rewrite-only
+/// — there is no v4 hide mode (hiding the device's only cellular v4 would wedge
+/// app networking), so `fake` is a required field in the schema.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Ipv4Rule {
+    pub iface: String,
+    pub prefix: String,
+    pub prefix_len: u8,
+    pub fake: String,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -279,6 +311,7 @@ pub fn parse_canonical(json: &str) -> Result<CanonicalConfig> {
     }
     validate_port_policies(&cfg)?;
     validate_ipv6_prefix_rules(&cfg)?;
+    validate_ipv4_rules(&cfg)?;
     Ok(cfg)
 }
 
@@ -303,32 +336,135 @@ fn validate_port_policies(cfg: &CanonicalConfig) -> Result<()> {
     Ok(())
 }
 
+/// True if the first `plen` bits of `fake` equal the first `plen` bits of
+/// `prefix` (both network-order byte strings) — the same full-byte + boundary
+/// mask semantics as the wire matcher (`vpnhide_prefix_match`). This is the
+/// "the fake must match its own rule" invariant (§4.3).
+fn top_bits_equal(prefix: &[u8], fake: &[u8], plen: u8) -> bool {
+    let full = (plen / 8) as usize;
+    let rem = plen % 8;
+    if prefix.len() < full || fake.len() < full || prefix[..full] != fake[..full] {
+        return false;
+    }
+    if rem > 0 {
+        if prefix.len() <= full || fake.len() <= full {
+            return false;
+        }
+        let mask = 0xffu8 << (8 - rem);
+        if (prefix[full] ^ fake[full]) & mask != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn validate_iface(iface: &str, field: &str) -> Result<()> {
+    // The wire space-joins tokens, so an iface must be a single printable
+    // ASCII token of 1..=15 chars (mirrors the parser's parse_ifname, and
+    // IFNAMSIZ-1); anything else would corrupt or be rejected on the wire.
+    if iface.is_empty() || iface.len() > 15 || !iface.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
+        return Err(
+            format!("{iface}: {field} must be 1..15 printable ASCII chars, no spaces").into(),
+        );
+    }
+    Ok(())
+}
+
 fn validate_ipv6_prefix_rules(cfg: &CanonicalConfig) -> Result<()> {
     for rule in &cfg.ipv6_prefix_rules {
-        // The wire space-joins tokens, so an iface must be a single printable
-        // ASCII token of 1..=15 chars (mirrors the parser's parse_ifname, and
-        // IFNAMSIZ-1); anything else would corrupt or be rejected on the wire.
-        if rule.iface.is_empty()
-            || rule.iface.len() > 15
-            || !rule.iface.bytes().all(|b| (0x21..=0x7e).contains(&b))
-        {
-            return Err(format!(
-                "{}: ipv6PrefixRules.iface must be 1..15 printable ASCII chars, no spaces",
-                rule.iface
-            )
-            .into());
-        }
-        if rule.prefix.parse::<std::net::Ipv6Addr>().is_err() {
-            return Err(format!(
-                "{}: ipv6PrefixRules.prefix must be a valid IPv6 address",
-                rule.prefix
-            )
-            .into());
-        }
+        validate_iface(&rule.iface, "ipv6PrefixRules.iface")?;
+        let prefix_addr = match rule.prefix.parse::<std::net::Ipv6Addr>() {
+            Ok(addr) => addr,
+            Err(_) => {
+                return Err(format!(
+                    "{}: ipv6PrefixRules.prefix must be a valid IPv6 address",
+                    rule.prefix
+                )
+                .into());
+            }
+        };
         if rule.prefix_len > 128 {
             return Err(format!(
                 "{}: ipv6PrefixRules.prefixLen must be within 0..=128",
                 rule.iface
+            )
+            .into());
+        }
+        match rule.mode {
+            RuleMode::Hide => {
+                // A hide rule cannot carry its fake onto the wire (the fourth
+                // token's presence IS rewrite mode), so accepting one here
+                // would silently drop it. Fail loudly instead.
+                if rule.fake.is_some() {
+                    return Err(format!(
+                        "{}: ipv6PrefixRules.fake is set but mode is hide — \
+                         drop the fake or set mode to rewrite",
+                        rule.iface
+                    )
+                    .into());
+                }
+            }
+            RuleMode::Rewrite => {
+                let Some(fake) = &rule.fake else {
+                    return Err(format!(
+                        "{}: ipv6PrefixRules.fake is required when mode is rewrite",
+                        rule.iface
+                    )
+                    .into());
+                };
+                let fake_addr = match fake.parse::<std::net::Ipv6Addr>() {
+                    Ok(addr) => addr,
+                    Err(_) => {
+                        return Err(format!(
+                            "{fake}: ipv6PrefixRules.fake must be a valid IPv6 address"
+                        )
+                        .into());
+                    }
+                };
+                if !top_bits_equal(&prefix_addr.octets(), &fake_addr.octets(), rule.prefix_len) {
+                    return Err(format!(
+                        "{fake}: ipv6PrefixRules.fake must keep the rule prefix \
+                         (first {} bits of {})",
+                        rule.prefix_len, rule.prefix
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_ipv4_rules(cfg: &CanonicalConfig) -> Result<()> {
+    for rule in &cfg.ipv4_rules {
+        validate_iface(&rule.iface, "ipv4Rules.iface")?;
+        let prefix_addr = match rule.prefix.parse::<std::net::Ipv4Addr>() {
+            Ok(addr) => addr,
+            Err(_) => {
+                return Err(format!(
+                    "{}: ipv4Rules.prefix must be a valid IPv4 address",
+                    rule.prefix
+                )
+                .into());
+            }
+        };
+        if rule.prefix_len > 32 {
+            return Err(
+                format!("{}: ipv4Rules.prefixLen must be within 0..=32", rule.iface).into(),
+            );
+        }
+        let fake_addr = match rule.fake.parse::<std::net::Ipv4Addr>() {
+            Ok(addr) => addr,
+            Err(_) => {
+                return Err(
+                    format!("{}: ipv4Rules.fake must be a valid IPv4 address", rule.fake).into(),
+                );
+            }
+        };
+        if !top_bits_equal(&prefix_addr.octets(), &fake_addr.octets(), rule.prefix_len) {
+            return Err(format!(
+                "{}: ipv4Rules.fake must keep the rule prefix (first {} bits of {})",
+                rule.fake, rule.prefix_len, rule.prefix
             )
             .into());
         }
@@ -368,7 +504,8 @@ pub(crate) fn project_native_with_pm_wait(
 /// Project validated JSON rules to wire `PrefixRule`s (colon-notation →
 /// 16 network-order bytes). Bounded by MAX_PREFIX_RULES; over-cap warns and
 /// truncates (mirrors the native-target cap above) instead of failing the
-/// whole activation.
+/// whole activation. Rewrite rules carry their fake onto the wire as the
+/// optional fourth token; hide rules serialise exactly as they always have.
 fn project_prefix_rules(rules: &[Ipv6PrefixRule]) -> Vec<PrefixRule> {
     if rules.len() > MAX_PREFIX_RULES {
         eprintln!(
@@ -390,6 +527,50 @@ fn project_prefix_rules(rules: &[Ipv6PrefixRule]) -> Vec<PrefixRule> {
                 .map(|v6| v6.octets())
                 .unwrap_or([0u8; 16]), // unreachable: parse_canonical validated
             prefix_len: rule.prefix_len,
+            fake: match rule.mode {
+                RuleMode::Hide => None,
+                RuleMode::Rewrite => Some(
+                    rule.fake
+                        .as_deref()
+                        .unwrap_or("::") // unreachable: parse_canonical validated
+                        .parse::<std::net::Ipv6Addr>()
+                        .map(|v6| v6.octets())
+                        .unwrap_or([0u8; 16]), // unreachable: parse_canonical validated
+                ),
+            },
+        })
+        .collect()
+}
+
+/// Project validated JSON v4 rules to wire `Prefix4Rule`s (dotted-quad →
+/// 4 network-order bytes). Bounded by MAX_PREFIX4_RULES; over-cap warns and
+/// truncates, same convention as the v6 projector above.
+fn project_prefix4_rules(rules: &[Ipv4Rule]) -> Vec<Prefix4Rule> {
+    if rules.len() > MAX_PREFIX4_RULES {
+        eprintln!(
+            "vpnhide: WARNING: {} ipv4Rules exceed the backend cap of {}; \
+             dropping the {} last rule(s)",
+            rules.len(),
+            MAX_PREFIX4_RULES,
+            rules.len() - MAX_PREFIX4_RULES,
+        );
+    }
+    rules
+        .iter()
+        .take(MAX_PREFIX4_RULES)
+        .map(|rule| Prefix4Rule {
+            ifname: rule.iface.clone(),
+            addr: rule
+                .prefix
+                .parse::<std::net::Ipv4Addr>()
+                .map(|v4| v4.octets())
+                .unwrap_or([0u8; 4]), // unreachable: parse_canonical validated
+            prefix_len: rule.prefix_len,
+            fake: rule
+                .fake
+                .parse::<std::net::Ipv4Addr>()
+                .map(|v4| v4.octets())
+                .unwrap_or([0u8; 4]), // unreachable: parse_canonical validated
         })
         .collect()
 }
@@ -430,7 +611,8 @@ pub(crate) fn project_native_with_resolver_for_family(
         .map(|(uid, hookmask)| Target { uid, hookmask })
         .collect::<Vec<_>>();
     let prefixes = project_prefix_rules(&cfg.ipv6_prefix_rules);
-    format_config_ex(cfg.debug, &targets, &prefixes)
+    let prefixes4 = project_prefix4_rules(&cfg.ipv4_rules);
+    format_config_ex(cfg.debug, &targets, &prefixes, &prefixes4)
 }
 
 pub fn project_native_with_resolver(cfg: &CanonicalConfig, resolver: &PackageUidMap) -> String {

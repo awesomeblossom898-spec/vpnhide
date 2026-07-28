@@ -100,6 +100,18 @@ class ProtocolTest {
                         .append(p.addrHex)
                         .append(':')
                         .append(p.prefixLen)
+                    // rewrite mode only: the fake renders as a 5th colon field
+                    if (p.fakeHex != null) append(':').append(p.fakeHex)
+                }
+                for (p in cfg.prefixes4) {
+                    append(";pfx4:")
+                        .append(p.ifname)
+                        .append(':')
+                        .append(p.addrHex)
+                        .append(':')
+                        .append(p.prefixLen)
+                        .append(':')
+                        .append(p.fakeHex)
                 }
             }
         assertEquals("cfg <$input>", expect, got)
@@ -196,6 +208,44 @@ class ProtocolTest {
         assertEquals(
             listOf(Protocol.PrefixRule("rmnet_data1", "24014900000000000000000000000000", 32)),
             requireNotNull(Protocol.parseConfig(withPrefixes)).prefixes,
+        )
+        // rewrite mode (fake token) + prefix4 round-trip too.
+        val withRewrite =
+            Protocol.formatConfig(
+                debug = false,
+                targets = targets,
+                prefixes =
+                    listOf(
+                        Protocol.PrefixRule(
+                            "ccmni1",
+                            "24014900000000000000000000000000",
+                            32,
+                            "240149007f3a9c215e881b4da2f06c19",
+                        ),
+                    ),
+                prefixes4 = listOf(Protocol.Prefix4Rule("ccmni0", "64400000", 10, "6457172d")),
+            )
+        assertEquals(
+            "vpnhide 1 config\ndebug 0\ntarget 0x27fa 0x3ff\ntarget 0x2947 0x4\n" +
+                "prefix ccmni1 24014900000000000000000000000000 0x20 240149007f3a9c215e881b4da2f06c19\n" +
+                "prefix4 ccmni0 64400000 0xa 6457172d\n",
+            withRewrite,
+        )
+        val reparsedRewrite = requireNotNull(Protocol.parseConfig(withRewrite))
+        assertEquals(
+            listOf(
+                Protocol.PrefixRule(
+                    "ccmni1",
+                    "24014900000000000000000000000000",
+                    32,
+                    "240149007f3a9c215e881b4da2f06c19",
+                ),
+            ),
+            reparsedRewrite.prefixes,
+        )
+        assertEquals(
+            listOf(Protocol.Prefix4Rule("ccmni0", "64400000", 10, "6457172d")),
+            reparsedRewrite.prefixes4,
         )
     }
 }

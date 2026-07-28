@@ -7,6 +7,9 @@ decides who is wrong. Every implementation (C / Rust / Kotlin) and every test
 vector references it.
 
 Status: `version 1` **frozen** — all seven OPEN items (§10) are resolved.
+Extended by addition only, per §4.5: 2026-07-28 — `prefix` gained an optional
+rewrite token and the `prefix4` record was added (still grammar version `1`;
+old readers degrade per the §4.5 mixed-version matrix).
 Key shape: one always-on Java (LSPosed) layer + exactly one active native
 backend, priority `kmod > KPM >
 Zygisk` (§1.5); three `kind`s — `config` (in), `stats` + `status` (out, §4.3);
@@ -234,7 +237,8 @@ over a non-ASCII first significant line to find a header on a later line.
 ```
 debug <flag>
 target <uid> <hookmask>
-prefix <ifname> <addr32hex> <plen_hex>
+prefix <ifname> <addr32hex> <plen_hex> [<fake32hex>]
+prefix4 <ifname> <addr8hex> <plen_hex> <fake8hex>
 ```
 
 - `debug <flag>` — `flag` is the literal `0` or `1`. At most one `debug` line;
@@ -261,6 +265,22 @@ prefix <ifname> <addr32hex> <plen_hex>
   `0x0`..`0x80` (0..128); `> 0x80` ⇒ skip the line, as does any malformation
   (the §4.5 skip philosophy). The kernel stores at most `MAX_PREFIX_RULES`
   (8) rules; over-cap ⇒ the activator warns on stderr and truncates.
+  **Rewrite mode:** an optional fourth token `<fake32hex>` turns the rule
+  from hide into rewrite — instead of dropping the matching address/route,
+  a gated reader is shown `<fake32hex>`; the address field is overwritten
+  in place (same byte length, so netlink messages and procfs lines keep
+  their exact shape). A matching v6 route **destination** is rewritten by
+  replacing its top 64 bits with the fake's top 64 bits (the low 64 bits
+  of the original destination survive), preserving address↔route
+  correlation; the route's own plen field is never consulted, exactly as
+  in hide mode. The fake MUST match its own rule: its first `plen` bits
+  equal the rule prefix's first `plen` bits (the activator validates this;
+  consumers treat the fake as opaque bytes). A malformed `<fake32hex>` ⇒
+  skip the line (§4.5). Tokens beyond the fourth are ignored (§4.5
+  trailing-token tolerance), so an old backend reading a rewrite rule
+  applies hide semantics — degrade-to-hide, never a leak. Rewrite hits are
+  attributed exactly like hide hits: same `hook_id`s, same `0xFFFFFFFF`
+  sentinel uid for global rules (stats, below).
   **Reader-uid gate:** the filter applies only when the reading process is an
   app (`uid >= 10000`, AID_APP — covers isolated uids) or the adb shell
   (`uid == 2000`, AID_SHELL — keeps on-device verification feasible); system
@@ -271,6 +291,28 @@ prefix <ifname> <addr32hex> <plen_hex>
   filtering — per-target VPN-interface hiding is unchanged. Backends that
   don't implement prefix filtering parse-and-ignore the record safely (§4.5).
   Producer convention: `prefix` lines come after `target` lines.
+- `prefix4 <ifname> <addr8hex> <plen_hex> <fake8hex>` — one per IPv4 rewrite
+  rule; **global** across targets (like `prefix`, there is no `uid` field).
+  A v4 address on `ifname` whose first `plen` bits equal the rule's match
+  prefix is rewritten to `<fake8hex>` for gated readers (the reader-uid gate
+  is the same one as `prefix`, above; system readers always see truth).
+  IPv4 is **rewrite-only** on the wire: hiding the device's only cellular v4
+  address would wedge app networking, so there is no hide mode and
+  `<fake8hex>` is REQUIRED — a `prefix4` line without it is malformed
+  (skip, §4.5). The fake MUST match its own rule: its first `plen` bits
+  equal the match prefix's first `plen` bits (activator-validated).
+  `addr8hex` is exactly 8 hex chars with **no `0x` prefix** — a second
+  documented deviation from §4.4, mirroring `addr32hex` (network-order
+  bytes, liberal-in case on read, lowercase-normalized on write).
+  `plen_hex` is a normal §4.4 value, `0x0`..`0x20` (0..32); `> 0x20` ⇒
+  skip the line, as does any malformation. The kernel stores at most
+  `MAX_PREFIX4_RULES` (4) v4 rules; over-cap ⇒ the activator warns on
+  stderr and truncates. Only v4 **address** paths are rewritten (the
+  `inet_fill_ifaddr` netlink dump); v4 route destinations are not matched
+  and not rewritten. Old backends skip the whole line (§4.5 unknown first
+  token) ⇒ fail-open: the real address is shown, which is exactly the
+  pre-`prefix4` behavior (no v4 filtering existed before this record).
+  Producer convention: `prefix4` lines come after `prefix` lines.
 
 **stats** (`kind = stats`):
 
@@ -338,16 +380,34 @@ One primitive for every data field (`uid`, `hookmask`, `hook_id`, `count`):
   saturate, not wrap).
 
 The `debug` flag (`0`/`1`) and the header `version` are the only non-hex tokens,
-and both are special-cased to their keyword/line.
+and both are special-cased to their keyword/line. The only deviations from the
+`0x` rule are the bare-hex address fields `addr32hex` and `addr8hex` (§4.3).
 
 ### 4.5 Forward compatibility
 
 - **Unknown first token** (keyword/record type) → skip that line, do not fail the
   payload. Lets a newer producer add record types without breaking older readers.
+- **Trailing tokens on a known record** → ignore them; consume the fields the
+  record is known to have and disregard the rest of the line. Lets a newer
+  producer extend a record in place: the older reader applies the record's
+  unextended semantics (a `prefix` rewrite rule is hidden, not rewritten —
+  degrade, never fail). Codified 2026-07-28 when `prefix` gained its optional
+  fourth token; it had been the de-facto behavior of all three parsers (C,
+  Rust, Kotlin) from the start.
 - **Unknown `hook_id`** → the app keeps it as "unknown hook N" when reading
   stats; the kernel masks unknown bits when applying a config mask
   (`mask & known_hooks`). New hooks never misfire on an old backend.
 - **Empty payload after the header** (zero records) is valid.
+
+**Mixed-version semantics (pinned 2026-07-28).** The version stays `1`; all
+extension is by addition under the two rules above. The degrade matrix an old
+reader produces on a newer payload: `prefix` with a `<fake32hex>` token ⇒ the
+matching address is *hidden* (unextended semantics — privacy-preserving, never
+a leak); `prefix4` ⇒ the line is skipped and the v4 address is *shown*
+(fail-open — identical to the pre-`prefix4` behavior, since no v4 filtering
+existed). A producer MUST NOT rely on a consumer implementing rewrite: the
+activator emits rewrite records uniformly to every native backend, backends
+that understand them act, and older ones degrade as described.
 
 ### 4.6 Example
 
@@ -358,6 +418,9 @@ vpnhide 1 config
 debug 0
 target 0x27fa 0x20003ff
 target 0x2947 0x004
+prefix ccmni1 24014900000000000000000000000000 0x20 240149007f3a9c215e881b4da2f06c19
+prefix rmnet_data1 24014900000000000000000000000000 0x20
+prefix4 ccmni1 64400000 0xa 6457172d
 ```
 
 stats (kernel → app):
@@ -451,7 +514,7 @@ the only writer of all profiles; each backend reads its own.
 
 | Channel | config records it acts on | emits stats? | emits status? |
 |---|---|---|---|
-| `.ko` / KPM | `debug`, `target` (kernel-owned mask bits) | yes | yes (§4.3) |
+| `.ko` / KPM | `debug`, `target` (kernel-owned mask bits), `prefix` + `prefix4` (global rules) | yes | yes (§4.3) |
 | Zygisk | `debug`, `target` (zygisk-owned mask bits), `prefix` (global rules, applied inside hooked processes only) | no, not yet (§7) | yes, via the app heartbeat |
 | LSPosed | `debug`, `target` (lsposed-owned mask bits, incl. package visibility) | yes | yes |
 

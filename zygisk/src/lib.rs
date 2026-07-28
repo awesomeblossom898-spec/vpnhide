@@ -214,6 +214,9 @@ fn load_config_from_dir_fd(dir_fd: std::os::fd::RawFd) -> ZygiskConfig {
                 debug,
                 targets,
                 mut prefixes,
+                // Zygisk does not implement v4 rewrite (kernel backends own it,
+                // §4.3); parse-and-ignore keeps the shared-grammar contract.
+                prefixes4: _,
             } = cfg;
             // Defensive cap, same as the native parsers (the activator
             // already truncates at 8; a hand-written snapshot could carry

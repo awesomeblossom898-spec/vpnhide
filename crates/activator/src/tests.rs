@@ -529,6 +529,7 @@ fn projection_is_bounded_to_backend_target_capacity() {
         apps,
         settings: Settings::default(),
         ipv6_prefix_rules: Vec::new(),
+        ipv4_rules: Vec::new(),
     };
     let pm = (0..70)
         .map(|i| format!("package:com.example.{i:02} uid:{}", 10_000 + i))
@@ -703,6 +704,144 @@ fn prefix_projection_is_bounded_to_backend_capacity() {
             .filter(|line| line.starts_with("prefix "))
             .count(),
         8
+    );
+}
+
+#[test]
+fn projects_v6_rewrite_and_v4_rules_onto_the_wire() {
+    let cfg = parse_canonical(
+        r#"{
+          "version": 1,
+          "ipv6PrefixRules": [
+            { "iface": "ccmni1", "prefix": "2401:4900::", "prefixLen": 32,
+              "mode": "rewrite", "fake": "2401:4900:7f3a:9c21:5e88:1b4d:a2f0:6c19" },
+            { "iface": "rmnet_data1", "prefix": "2401:4900::", "prefixLen": 32 }
+          ],
+          "ipv4Rules": [
+            { "iface": "ccmni0", "prefix": "100.64.0.0", "prefixLen": 10, "fake": "100.87.23.45" }
+          ]
+        }"#,
+    )
+    .unwrap();
+    // The rewrite rule carries its fake as the fourth token; the hide rule
+    // serialises exactly as before; prefix4 lines come after prefix lines.
+    assert_eq!(
+        project_native_with_resolver(&cfg, &PackageUidMap::default()),
+        "vpnhide 1 config\n\
+         debug 0\n\
+         prefix ccmni1 24014900000000000000000000000000 0x20 240149007f3a9c215e881b4da2f06c19\n\
+         prefix rmnet_data1 24014900000000000000000000000000 0x20\n\
+         prefix4 ccmni0 64400000 0xa 6457172d\n",
+    );
+}
+
+#[test]
+fn old_config_without_rewrite_fields_projects_unchanged() {
+    // Backward compat: absent mode/fake/ipv4Rules ⇒ hide semantics, wire
+    // byte-identical to the pre-feature format.
+    let cfg = parse_canonical(
+        r#"{ "ipv6PrefixRules": [ { "iface": "ccmni1", "prefix": "2401:4900::", "prefixLen": 32 } ] }"#,
+    )
+    .unwrap();
+    assert_eq!(cfg.ipv6_prefix_rules[0].mode, crate::model::RuleMode::Hide);
+    assert_eq!(cfg.ipv6_prefix_rules[0].fake, None);
+    assert!(cfg.ipv4_rules.is_empty());
+    assert_eq!(
+        project_native_with_resolver(&cfg, &PackageUidMap::default()),
+        "vpnhide 1 config\n\
+         debug 0\n\
+         prefix ccmni1 24014900000000000000000000000000 0x20\n",
+    );
+}
+
+#[test]
+fn rewrite_validation_rejects_bad_entries() {
+    // rewrite without a fake is a hard error (never silently degrade).
+    assert!(
+        parse_canonical(
+            r#"{ "ipv6PrefixRules": [ { "iface": "ccmni1", "prefix": "2401:4900::", "prefixLen": 32, "mode": "rewrite" } ] }"#,
+        )
+        .is_err(),
+    );
+    // fake that is not an IPv6 address.
+    assert!(
+        parse_canonical(
+            r#"{ "ipv6PrefixRules": [ { "iface": "ccmni1", "prefix": "2401:4900::", "prefixLen": 32, "mode": "rewrite", "fake": "not-an-addr" } ] }"#,
+        )
+        .is_err(),
+    );
+    // fake outside the rule prefix (top-32 bits differ).
+    assert!(
+        parse_canonical(
+            r#"{ "ipv6PrefixRules": [ { "iface": "ccmni1", "prefix": "2401:4900::", "prefixLen": 32, "mode": "rewrite", "fake": "2401:4a00::1" } ] }"#,
+        )
+        .is_err(),
+    );
+    // fake set with mode hide (would be silently dropped on the wire).
+    assert!(
+        parse_canonical(
+            r#"{ "ipv6PrefixRules": [ { "iface": "ccmni1", "prefix": "2401:4900::", "prefixLen": 32, "fake": "2401:4900::1" } ] }"#,
+        )
+        .is_err(),
+    );
+}
+
+#[test]
+fn ipv4_rule_validation_rejects_bad_entries() {
+    // Missing fake is a serde-level hard error (the record is rewrite-only).
+    assert!(
+        parse_canonical(
+            r#"{ "ipv4Rules": [ { "iface": "ccmni1", "prefix": "100.64.0.0", "prefixLen": 10 } ] }"#,
+        )
+        .is_err(),
+    );
+    // prefixLen out of range.
+    assert!(
+        parse_canonical(
+            r#"{ "ipv4Rules": [ { "iface": "ccmni1", "prefix": "100.64.0.0", "prefixLen": 33, "fake": "100.87.23.45" } ] }"#,
+        )
+        .is_err(),
+    );
+    // Not an IPv4 address.
+    assert!(
+        parse_canonical(
+            r#"{ "ipv4Rules": [ { "iface": "ccmni1", "prefix": "100.64.0", "prefixLen": 10, "fake": "100.87.23.45" } ] }"#,
+        )
+        .is_err(),
+    );
+    // Fake outside the rule prefix (100.87.x is inside /10; 192.168.x is not).
+    assert!(
+        parse_canonical(
+            r#"{ "ipv4Rules": [ { "iface": "ccmni1", "prefix": "100.64.0.0", "prefixLen": 10, "fake": "192.168.1.7" } ] }"#,
+        )
+        .is_err(),
+    );
+    // iface with a space.
+    assert!(
+        parse_canonical(
+            r#"{ "ipv4Rules": [ { "iface": "ccmni 1", "prefix": "100.64.0.0", "prefixLen": 10, "fake": "100.87.23.45" } ] }"#,
+        )
+        .is_err(),
+    );
+}
+
+#[test]
+fn ipv4_projection_is_bounded_to_backend_capacity() {
+    let rules = (0..6)
+        .map(|i| {
+            format!(
+                "{{ \"iface\": \"if{i}\", \"prefix\": \"100.64.0.0\", \"prefixLen\": 10, \"fake\": \"100.87.23.45\" }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let cfg = parse_canonical(&format!("{{ \"ipv4Rules\": [ {rules} ] }}")).unwrap();
+    let wire = project_native_with_resolver(&cfg, &PackageUidMap::default());
+    assert_eq!(
+        wire.lines()
+            .filter(|line| line.starts_with("prefix4 "))
+            .count(),
+        4
     );
 }
 

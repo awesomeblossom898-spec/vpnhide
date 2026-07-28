@@ -322,12 +322,37 @@ struct vpnhide_target {
 #define MAX_PREFIX_RULES 8
 #endif
 
-/* one `prefix <ifname> <addr32hex> <plen>` config record (global scope): hide
- * any v6 on interface `ifname` whose first `prefix_len` bits equal `addr`. */
+#ifndef MAX_PREFIX4_RULES
+#define MAX_PREFIX4_RULES 4
+#endif
+
+/* Rule modes for `prefix` records (§4.3): HIDE drops the matching
+ * address/route; REWRITE shows `fake` instead. The wire carries no mode token —
+ * the optional fourth `<fake32hex>` token's presence IS the mode. */
+#define VPNHIDE_RULE_HIDE 0
+#define VPNHIDE_RULE_REWRITE 1
+
+/* one `prefix <ifname> <addr32hex> <plen> [<fake32hex>]` config record (global
+ * scope): hide any v6 on interface `ifname` whose first `prefix_len` bits equal
+ * `addr`; with mode == VPNHIDE_RULE_REWRITE, show `fake` in its place. `fake`
+ * is zeroed in hide mode (deterministic, never inspected). */
 struct vpnhide_prefix_rule {
 	char ifname[VPNHIDE_IFNAMSIZ]; /* NUL-terminated */
 	unsigned char addr[16]; /* network order  */
 	unsigned char prefix_len; /* 0..128         */
+	unsigned char mode; /* VPNHIDE_RULE_*     */
+	unsigned char fake[16]; /* rewrite target     */
+};
+
+/* one `prefix4 <ifname> <addr8hex> <plen> <fake8hex>` config record (global
+ * scope, REWRITE-ONLY — no v4 hide mode exists on the wire, §4.3): a gated
+ * reader sees `fake` in place of any v4 address on `ifname` whose first
+ * `prefix_len` bits equal `addr`. */
+struct vpnhide_prefix4_rule {
+	char ifname[VPNHIDE_IFNAMSIZ]; /* NUL-terminated */
+	unsigned char addr[4]; /* network order   */
+	unsigned char prefix_len; /* 0..32          */
+	unsigned char fake[4]; /* rewrite target  */
 };
 
 /* Sentinel UID for the uid-independent global prefix-hit stats row: prefix-rule
@@ -564,6 +589,29 @@ static inline int vpnhide_tok_addr32(const char *b, unsigned long ts,
 }
 
 /*
+ * Parse EXACTLY 8 hex chars [ts,te) into out[4] (network order) — the IPv4
+ * sibling of vpnhide_tok_addr32, used by the `prefix4` record (`addr8hex`, the
+ * second documented bare-hex deviation from §4.4). Not 8 chars, or any non-hex
+ * char → 0 (reject the line).
+ */
+static inline int vpnhide_tok_addr8(const char *b, unsigned long ts,
+				    unsigned long te, unsigned char out[4])
+{
+	int i, hi, lo;
+
+	if (te - ts != 8)
+		return 0;
+	for (i = 0; i < 4; i++) {
+		hi = vpnhide_hexval(b[ts + (unsigned long)(2 * i)]);
+		lo = vpnhide_hexval(b[ts + (unsigned long)(2 * i + 1)]);
+		if (hi < 0 || lo < 0)
+			return 0;
+		out[i] = (unsigned char)((hi << 4) | lo);
+	}
+	return 1;
+}
+
+/*
  * Copy an interface-name token [ts,te) into dst[VPNHIDE_IFNAMSIZ]. Empty, or
  * too long to hold a NUL (>= IFNAMSIZ) → 0 (reject the line).
  */
@@ -590,6 +638,31 @@ static inline int vpnhide_prefix_match(const unsigned char addr[16],
 	unsigned int full, rem, i;
 
 	if (!addr || !r || r->prefix_len > 128)
+		return 0;
+	full = (unsigned int)r->prefix_len >> 3;
+	rem = (unsigned int)r->prefix_len & 7u;
+	for (i = 0; i < full; i++)
+		if (addr[i] != r->addr[i])
+			return 0;
+	if (rem) {
+		unsigned char mask = (unsigned char)(0xffu << (8u - rem));
+
+		if (((addr[full] ^ r->addr[full]) & mask) != 0)
+			return 0;
+	}
+	return 1;
+}
+
+/*
+ * IPv4 sibling of vpnhide_prefix_match: true if the first `r->prefix_len` bits
+ * of `addr` (4 network-order bytes) equal `r->addr`. prefix_len > 32 → 0.
+ */
+static inline int vpnhide_prefix4_match(const unsigned char addr[4],
+					const struct vpnhide_prefix4_rule *r)
+{
+	unsigned int full, rem, i;
+
+	if (!addr || !r || r->prefix_len > 32)
 		return 0;
 	full = (unsigned int)r->prefix_len >> 3;
 	rem = (unsigned int)r->prefix_len & 7u;
@@ -804,13 +877,17 @@ static inline void vpnhide_target_set(struct vpnhide_target *out, int *n,
  * present, and is left UNCHANGED otherwise (the caller seeds it with the live
  * value so "absent ⇒ unchanged-from-default", §4.3). Unknown keywords and
  * malformed numeric lines are skipped, not fatal (§4.5). Prefix rules
- * (§ prefix record) are written to pout[0..*pnr) when pout && pnr are given.
+ * (§4.3 `prefix`) are written to pout[0..*pnr) when pout && pnr are given;
+ * IPv4 rewrite rules (§4.3 `prefix4`) to p4out[0..*p4nr) when p4out && p4nr
+ * are given.
  */
 static inline int vpnhide_parse_config_ex(const char *b, unsigned long len,
 					  struct vpnhide_target *out, int max,
 					  int *debug,
 					  struct vpnhide_prefix_rule *pout,
-					  int pmax, int *pnr)
+					  int pmax, int *pnr,
+					  struct vpnhide_prefix4_rule *p4out,
+					  int p4max, int *p4nr)
 {
 	unsigned long i, ls, le, cs, p, ts, te;
 	int ascii, n = 0;
@@ -818,6 +895,8 @@ static inline int vpnhide_parse_config_ex(const char *b, unsigned long len,
 
 	if (pnr)
 		*pnr = 0;
+	if (p4nr)
+		*p4nr = 0;
 	if (k != VPNHIDE_KIND_CONFIG)
 		return -1;
 
@@ -852,6 +931,7 @@ static inline int vpnhide_parse_config_ex(const char *b, unsigned long len,
 		} else if (vpnhide_tok_eq(b, ts, te, "prefix")) {
 			struct vpnhide_prefix_rule r;
 			unsigned long long plen;
+			int j;
 
 			if (!vpnhide_next_token(b, &p, le, &ts, &te) ||
 			    !vpnhide_tok_ifname(b, ts, te, r.ifname))
@@ -864,8 +944,42 @@ static inline int vpnhide_parse_config_ex(const char *b, unsigned long len,
 			    plen > 128)
 				continue;
 			r.prefix_len = (unsigned char)plen;
+			r.mode = VPNHIDE_RULE_HIDE;
+			for (j = 0; j < 16; j++)
+				r.fake[j] = 0;
+			/* Optional fourth token: <fake32hex> ⇒ rewrite mode.
+			 * Present but malformed ⇒ skip the whole line (§4.3) —
+			 * never silently degrade to hide. Tokens beyond the
+			 * fourth are ignored (§4.5 trailing-token tolerance). */
+			if (vpnhide_next_token(b, &p, le, &ts, &te)) {
+				if (!vpnhide_tok_addr32(b, ts, te, r.fake))
+					continue;
+				r.mode = VPNHIDE_RULE_REWRITE;
+			}
 			if (pout && pnr && *pnr < pmax)
 				pout[(*pnr)++] = r;
+		} else if (vpnhide_tok_eq(b, ts, te, "prefix4")) {
+			struct vpnhide_prefix4_rule r4;
+			unsigned long long plen4;
+
+			if (!vpnhide_next_token(b, &p, le, &ts, &te) ||
+			    !vpnhide_tok_ifname(b, ts, te, r4.ifname))
+				continue;
+			if (!vpnhide_next_token(b, &p, le, &ts, &te) ||
+			    !vpnhide_tok_addr8(b, ts, te, r4.addr))
+				continue;
+			if (!vpnhide_next_token(b, &p, le, &ts, &te) ||
+			    !vpnhide_tok_hex(b, ts, te, 32, &plen4) ||
+			    plen4 > 32)
+				continue;
+			/* <fake8hex> is REQUIRED — the record is rewrite-only;
+			 * without it the line is malformed (§4.3). */
+			if (!vpnhide_next_token(b, &p, le, &ts, &te) ||
+			    !vpnhide_tok_addr8(b, ts, te, r4.fake))
+				continue;
+			r4.prefix_len = (unsigned char)plen4;
+			if (p4out && p4nr && *p4nr < p4max)
+				p4out[(*p4nr)++] = r4;
 		}
 		/* unknown first token ⇒ skip the line (§4.5) */
 	}
@@ -877,7 +991,8 @@ static inline int vpnhide_parse_config(const char *b, unsigned long len,
 				       struct vpnhide_target *out, int max,
 				       int *debug)
 {
-	return vpnhide_parse_config_ex(b, len, out, max, debug, 0, 0, 0);
+	return vpnhide_parse_config_ex(b, len, out, max, debug, 0, 0, 0, 0, 0,
+				       0);
 }
 
 /* --- serialise (§4.3/§4.4) ------------------------------------------- */

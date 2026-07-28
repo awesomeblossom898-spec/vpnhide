@@ -33,6 +33,12 @@ pub const MAX_TARGET_UIDS: usize = 64;
 /// `#define MAX_PREFIX_RULES` in kmod/shared/vpnhide_logic.h — keep in sync.
 pub const MAX_PREFIX_RULES: usize = 8;
 
+/// Maximum number of `prefix4` records a native backend will store. Mirrors
+/// `#define MAX_PREFIX4_RULES` in kmod/shared/vpnhide_logic.h — keep in sync
+/// (and in kmod/vpnhide_kmod.c, kmod/kpm/vpnhide_kpm.c, and the Kotlin
+/// editors' rule-count surfaces).
+pub const MAX_PREFIX4_RULES: usize = 4;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum Kind {
     Config,
@@ -47,12 +53,25 @@ pub struct Target {
     pub hookmask: u32,
 }
 
-/// One `prefix <ifname> <addr32hex> <plen>` record (§4.3, global scope).
+/// One `prefix <ifname> <addr32hex> <plen> [<fake32hex>]` record (§4.3, global
+/// scope). `fake` is `Some` iff the optional fourth token was present — its
+/// presence IS rewrite mode; the wire carries no explicit mode token.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PrefixRule {
     pub ifname: String,
     pub addr: [u8; 16],
     pub prefix_len: u8,
+    pub fake: Option<[u8; 16]>,
+}
+
+/// One `prefix4 <ifname> <addr8hex> <plen> <fake8hex>` record (§4.3, global
+/// scope, rewrite-only — the fake is required, never optional).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Prefix4Rule {
+    pub ifname: String,
+    pub addr: [u8; 4],
+    pub prefix_len: u8,
+    pub fake: [u8; 4],
 }
 
 /// A parsed `config` snapshot. `debug` is `None` when no `debug` line was
@@ -62,6 +81,7 @@ pub struct Config {
     pub debug: Option<bool>,
     pub targets: Vec<Target>,
     pub prefixes: Vec<PrefixRule>,
+    pub prefixes4: Vec<Prefix4Rule>,
 }
 
 /// One sparse `<hook_id>:<count>` stats cell for a uid (§4.3). Producers group
@@ -201,6 +221,21 @@ fn parse_addr32(tok: &[u8]) -> Option<[u8; 16]> {
     Some(out)
 }
 
+/// Parse exactly 8 hex chars (any case) into 4 network-order bytes — the IPv4
+/// sibling of [`parse_addr32`] (`addr8hex`, §4.3's second bare-hex deviation).
+fn parse_addr8(tok: &[u8]) -> Option<[u8; 4]> {
+    if tok.len() != 8 {
+        return None;
+    }
+    let mut out = [0u8; 4];
+    for i in 0..4 {
+        let hi = hexval(tok[2 * i])?;
+        let lo = hexval(tok[2 * i + 1])?;
+        out[i] = (hi << 4) | lo;
+    }
+    Some(out)
+}
+
 /// An interface-name token: 1..15 ASCII chars (tokens are already ASCII, since
 /// `significant()` rejects non-ASCII lines). Empty or >= 16 → None.
 fn parse_ifname(tok: &[u8]) -> Option<String> {
@@ -292,6 +327,7 @@ pub fn parse_config(buf: &[u8]) -> Option<Config> {
         debug: None,
         targets: Vec::new(),
         prefixes: Vec::new(),
+        prefixes4: Vec::new(),
     };
     for line in lines(rest) {
         let Some(content) = significant(line) else {
@@ -324,10 +360,44 @@ pub fn parse_config(buf: &[u8]) -> Option<Config> {
                 if plen > 128 {
                     continue;
                 }
+                // Optional fourth token: <fake32hex> ⇒ rewrite mode. Present
+                // but malformed ⇒ skip the whole line (§4.3) — never silently
+                // degrade to hide. Tokens beyond the fourth are ignored (§4.5).
+                let fake = match it.next() {
+                    None => None,
+                    Some(tok) => match parse_addr32(tok) {
+                        Some(f) => Some(f),
+                        None => continue, // malformed fake ⇒ skip line
+                    },
+                };
                 cfg.prefixes.push(PrefixRule {
                     ifname,
                     addr,
                     prefix_len: plen as u8,
+                    fake,
+                });
+            }
+            Some(b"prefix4") => {
+                let (Some(ifname), Some(addr), Some(plen)) = (
+                    it.next().and_then(parse_ifname),
+                    it.next().and_then(parse_addr8),
+                    it.next().and_then(|t| parse_hex(t, 32)),
+                ) else {
+                    continue; // malformed ⇒ skip line
+                };
+                if plen > 32 {
+                    continue;
+                }
+                // <fake8hex> is REQUIRED — the record is rewrite-only; without
+                // it the line is malformed (§4.3). Fifth+ tokens ignored (§4.5).
+                let Some(fake) = it.next().and_then(parse_addr8) else {
+                    continue;
+                };
+                cfg.prefixes4.push(Prefix4Rule {
+                    ifname,
+                    addr,
+                    prefix_len: plen as u8,
+                    fake,
                 });
             }
             _ => {} // unknown keyword ⇒ skip line (§4.5)
@@ -346,8 +416,16 @@ fn set_target(targets: &mut Vec<Target>, uid: u32, hookmask: u32) {
 
 // --- serialise (§4.3/§4.4) -------------------------------------------------
 
-/// Serialise a `config` snapshot with prefix rules (lowercase-out, §4.4).
-pub fn format_config_ex(debug: bool, targets: &[Target], prefixes: &[PrefixRule]) -> String {
+/// Serialise a `config` snapshot with prefix + prefix4 rules (lowercase-out,
+/// §4.4). Hide-mode prefix rules emit exactly three tokens (byte-identical to
+/// the pre-rewrite format); the fake token appears only in rewrite mode.
+/// `prefix4` lines come after `prefix` lines (producer convention, §4.3).
+pub fn format_config_ex(
+    debug: bool,
+    targets: &[Target],
+    prefixes: &[PrefixRule],
+    prefixes4: &[Prefix4Rule],
+) -> String {
     let mut out = String::from("vpnhide 1 config\n");
     out.push_str(if debug { "debug 1\n" } else { "debug 0\n" });
     for t in targets {
@@ -358,14 +436,32 @@ pub fn format_config_ex(debug: bool, targets: &[Target], prefixes: &[PrefixRule]
         for b in pr.addr {
             out.push_str(&format!("{b:02x}"));
         }
-        out.push_str(&format!(" 0x{:x}\n", pr.prefix_len));
+        out.push_str(&format!(" 0x{:x}", pr.prefix_len));
+        if let Some(fake) = pr.fake {
+            out.push(' ');
+            for b in fake {
+                out.push_str(&format!("{b:02x}"));
+            }
+        }
+        out.push('\n');
+    }
+    for pr in prefixes4 {
+        out.push_str(&format!("prefix4 {} ", pr.ifname));
+        for b in pr.addr {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out.push_str(&format!(" 0x{:x} ", pr.prefix_len));
+        for b in pr.fake {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out.push('\n');
     }
     out
 }
 
 /// Serialise a `config` snapshot (targets only). Existing callers unchanged.
 pub fn format_config(debug: bool, targets: &[Target]) -> String {
-    format_config_ex(debug, targets, &[])
+    format_config_ex(debug, targets, &[], &[])
 }
 
 /// Serialise a `stats` snapshot. Entries grouped by uid (consecutive same-uid
@@ -489,6 +585,22 @@ mod tests {
                 got.push_str(&format!("{b:02x}"));
             }
             got.push_str(&format!(":{}", pr.prefix_len));
+            if let Some(fake) = pr.fake {
+                got.push(':');
+                for b in fake {
+                    got.push_str(&format!("{b:02x}"));
+                }
+            }
+        }
+        for pr in &cfg.prefixes4 {
+            got.push_str(&format!(";pfx4:{}:", pr.ifname));
+            for b in pr.addr {
+                got.push_str(&format!("{b:02x}"));
+            }
+            got.push_str(&format!(":{}:", pr.prefix_len));
+            for b in pr.fake {
+                got.push_str(&format!("{b:02x}"));
+            }
         }
         assert_eq!(got, expect, "cfg mismatch for {input:?}");
     }

@@ -24,13 +24,26 @@ internal object Protocol {
         val hookmask: Long,
     )
 
-    /** One `prefix <ifname> <addr32hex> <plen>` record (§4.3, global scope).
+    /** One `prefix <ifname> <addr32hex> <plen> [<fake32hex>]` record (§4.3, global scope).
      * [addrHex] is the normalised lowercase 32-hex form of the 16 network-order
-     * bytes (liberal-in case on the wire, normalised at parse). */
+     * bytes (liberal-in case on the wire, normalised at parse). [fakeHex] is the
+     * optional rewrite target — non-null IS rewrite mode; the wire carries no
+     * explicit mode token. */
     data class PrefixRule(
         val ifname: String,
         val addrHex: String,
         val prefixLen: Long,
+        val fakeHex: String? = null,
+    )
+
+    /** One `prefix4 <ifname> <addr8hex> <plen> <fake8hex>` record (§4.3, global
+     * scope, rewrite-only — [fakeHex] is required, never null). Both hex fields
+     * are the normalised lowercase 8-hex form of 4 network-order bytes. */
+    data class Prefix4Rule(
+        val ifname: String,
+        val addrHex: String,
+        val prefixLen: Long,
+        val fakeHex: String,
     )
 
     /** A parsed config. [debug] is null when no `debug` line was present
@@ -39,6 +52,7 @@ internal object Protocol {
         val debug: Boolean?,
         val targets: List<Target>,
         val prefixes: List<PrefixRule>,
+        val prefixes4: List<Prefix4Rule> = emptyList(),
     )
 
     data class StatEntry(
@@ -119,6 +133,13 @@ internal object Protocol {
             .takeIf { t -> t.length == 32 && t.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' } }
             ?.lowercase()
 
+    /** The 4-byte address: exactly 8 hex chars — the IPv4 sibling of
+     * [parseAddr32] (`addr8hex`, §4.3's second bare-hex deviation). */
+    private fun parseAddr8(tok: String): String? =
+        tok
+            .takeIf { t -> t.length == 8 && t.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' } }
+            ?.lowercase()
+
     /** Always lowercase out (§4.4: liberal-in / strict-out). Unsigned so a u64
      * value with the high bit set still renders correctly. */
     private fun hex(v: Long): String = "0x" + java.lang.Long.toUnsignedString(v, 16)
@@ -177,6 +198,7 @@ internal object Protocol {
         var debug: Boolean? = null
         val targets = mutableListOf<Target>()
         val prefixes = mutableListOf<PrefixRule>()
+        val prefixes4 = mutableListOf<Prefix4Rule>()
         forEachRecord(h.records) { toks ->
             when (toks.getOrNull(0)) {
                 "debug" -> {
@@ -203,13 +225,31 @@ internal object Protocol {
                     val ifname = toks.getOrNull(1)?.let(::parseIfname)
                     val addr = toks.getOrNull(2)?.let(::parseAddr32)
                     val plen = toks.getOrNull(3)?.let { parseHex(it, 32) }
-                    if (ifname != null && addr != null && plen != null && plen <= 128) {
-                        prefixes += PrefixRule(ifname, addr, plen)
+                    // Optional 4th token: <fake32hex> ⇒ rewrite mode. Present but
+                    // malformed ⇒ skip the whole line (§4.3), never degrade to
+                    // hide. Tokens beyond the fourth are ignored (§4.5).
+                    val fakeTok = toks.getOrNull(4)
+                    val fake = fakeTok?.let(::parseAddr32)
+                    if (ifname != null && addr != null && plen != null && plen <= 128 &&
+                        (fakeTok == null || fake != null)
+                    ) {
+                        prefixes += PrefixRule(ifname, addr, plen, fake)
+                    }
+                }
+
+                "prefix4" -> {
+                    val ifname = toks.getOrNull(1)?.let(::parseIfname)
+                    val addr = toks.getOrNull(2)?.let(::parseAddr8)
+                    val plen = toks.getOrNull(3)?.let { parseHex(it, 32) }
+                    // <fake8hex> is REQUIRED — the record is rewrite-only (§4.3).
+                    val fake = toks.getOrNull(4)?.let(::parseAddr8)
+                    if (ifname != null && addr != null && plen != null && plen <= 32 && fake != null) {
+                        prefixes4 += Prefix4Rule(ifname, addr, plen, fake)
                     }
                 }
             }
         }
-        return Config(debug, targets, prefixes)
+        return Config(debug, targets, prefixes, prefixes4)
     }
 
     private fun setTarget(
@@ -225,6 +265,7 @@ internal object Protocol {
         debug: Boolean?,
         targets: List<Target>,
         prefixes: List<PrefixRule> = emptyList(),
+        prefixes4: List<Prefix4Rule> = emptyList(),
     ): String =
         buildString {
             append("vpnhide ").append(VERSION).append(" config\n")
@@ -243,6 +284,21 @@ internal object Protocol {
                     .append(p.addrHex)
                     .append(' ')
                     .append(hex(p.prefixLen))
+                // Hide mode emits exactly three tokens (byte-identical to the
+                // pre-rewrite format); the fake token appears only in rewrite mode.
+                if (p.fakeHex != null) append(' ').append(p.fakeHex)
+                append('\n')
+            }
+            // prefix4 lines come after prefix lines (producer convention, §4.3).
+            for (p in prefixes4) {
+                append("prefix4 ")
+                    .append(p.ifname)
+                    .append(' ')
+                    .append(p.addrHex)
+                    .append(' ')
+                    .append(hex(p.prefixLen))
+                    .append(' ')
+                    .append(p.fakeHex)
                     .append('\n')
             }
         }

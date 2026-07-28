@@ -10,7 +10,10 @@
 #
 # Row types (col0):
 #   cfg   | <input> | <expected>           parse_config; expected = REJECT, or
-#                                           debug=<-1|0|1> then ;<uid>:<hookmask> per target
+#                                           debug=<-1|0|1> then ;<uid>:<hookmask> per target,
+#                                           then ;pfx:<iface>:<32hex>:<plen>[:<32fake>] per v6
+#                                           rule (fake field only in rewrite mode), then
+#                                           ;pfx4:<iface>:<8hex>:<plen>:<8fake> per v4 rule
 #   kind  | <input> | <CONFIG|STATS|STATUS|INVALID>   peek_kind
 #   stats | <uid,hid,cnt;...> | <output>   format_stats (input grouped by uid)
 #   status| <backend,kver,hooks,error> | <output>     format_status
@@ -102,3 +105,31 @@ cfg|vpnhide 1 config\nprefix abcdefghijklmnop 24014900000000000000000000000000 0
 cfg|vpnhide 1 config\nprefix rmnet_data1 24014900000000000000000000000000\n|debug=-1
 # prefix line before target line -> order-independent parse, producers emit targets first
 cfg|vpnhide 1 config\nprefix wlan0 fe800000000000000000000000000000 0x40\ntarget 0x2710 0x1\n|debug=-1;0x2710:0x1;pfx:wlan0:fe800000000000000000000000000000:64
+
+# --- rewrite mode (prefix optional 4th token) + prefix4 (2026-07-28, §4.3/§4.5)
+# v6 rewrite: the 4th token parses as the fake; rendered as :<32fake> after plen
+cfg|vpnhide 1 config\nprefix ccmni1 24014900000000000000000000000000 0x20 240149007f3a9c215e881b4da2f06c19\n|debug=-1;pfx:ccmni1:24014900000000000000000000000000:32:240149007f3a9c215e881b4da2f06c19
+# fake is liberal-in on case; rendered lowercase-out
+cfg|vpnhide 1 config\nprefix ccmni1 24014900000000000000000000000000 0x20 240149007F3A9C215E881B4DA2F06C19\n|debug=-1;pfx:ccmni1:24014900000000000000000000000000:32:240149007f3a9c215e881b4da2f06c19
+# malformed fake (31 chars) -> skip the WHOLE line; never degrade to hide (§4.3)
+cfg|vpnhide 1 config\nprefix ccmni1 24014900000000000000000000000000 0x20 240149007f3a9c215e881b4da2f06c1\ntarget 0x5 0x2\n|debug=-1;0x5:0x2
+# non-hex fake -> same whole-line skip
+cfg|vpnhide 1 config\nprefix ccmni1 24014900000000000000000000000000 0x20 zz0149007f3a9c215e881b4da2f06c19\n|debug=-1
+# tokens beyond the fourth are ignored (§4.5 trailing-token tolerance)
+cfg|vpnhide 1 config\nprefix ccmni1 24014900000000000000000000000000 0x20 240149007f3a9c215e881b4da2f06c19 extra stuff\n|debug=-1;pfx:ccmni1:24014900000000000000000000000000:32:240149007f3a9c215e881b4da2f06c19
+# plen > 128 still rejects the line even with a well-formed fake
+cfg|vpnhide 1 config\nprefix ccmni1 24014900000000000000000000000000 0x81 240149007f3a9c215e881b4da2f06c19\n|debug=-1
+# v4 rewrite rule; rendered ;pfx4:<iface>:<8hex addr>:<plen>:<8hex fake>
+cfg|vpnhide 1 config\nprefix4 ccmni1 64400000 0xa 6457172d\n|debug=-1;pfx4:ccmni1:64400000:10:6457172d
+# addr8hex/fake8hex are liberal-in on case; rendered lowercase-out
+cfg|vpnhide 1 config\nprefix4 ccmni1 644000AB 0xA 6457172D\n|debug=-1;pfx4:ccmni1:644000ab:10:6457172d
+# missing fake -> the record is rewrite-only, so the line is malformed (§4.3)
+cfg|vpnhide 1 config\nprefix4 ccmni1 64400000 0xa\ntarget 0x6 0x2\n|debug=-1;0x6:0x2
+# plen > 32 -> skip the line
+cfg|vpnhide 1 config\nprefix4 ccmni1 64400000 0x21 6457172d\n|debug=-1
+# short addr (7 chars) -> skip the line
+cfg|vpnhide 1 config\nprefix4 ccmni1 6440000 0xa 6457172d\n|debug=-1
+# tokens beyond the fourth are ignored (§4.5 trailing-token tolerance)
+cfg|vpnhide 1 config\nprefix4 ccmni1 64400000 0xa 6457172d extra\n|debug=-1;pfx4:ccmni1:64400000:10:6457172d
+# all three record kinds together, order-independent
+cfg|vpnhide 1 config\ntarget 0x2710 0x1\nprefix4 ccmni0 64400000 0xa 6457172d\nprefix ccmni1 24014900000000000000000000000000 0x20\n|debug=-1;0x2710:0x1;pfx:ccmni1:24014900000000000000000000000000:32;pfx4:ccmni0:64400000:10:6457172d

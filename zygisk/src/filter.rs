@@ -1067,6 +1067,7 @@ tun0:  300    3    0    0\n"
             ifname: ifname.to_string(),
             addr,
             prefix_len: plen,
+            fake: None,
         }
     }
 

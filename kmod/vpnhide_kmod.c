@@ -139,6 +139,11 @@ static int nr_prefix_rules;
 /* Lock-free gate so the hot fill/seq paths skip the scan when no rule is set. */
 static bool prefix_rules_present;
 
+static struct vpnhide_prefix4_rule prefix4_rules[MAX_PREFIX4_RULES];
+static int nr_prefix4_rules;
+/* Same lock-free gate idiom as prefix_rules_present, for the v4 rewrite path. */
+static bool prefix4_rules_present;
+
 /* The enabled-hook mask for the calling UID (0 if it is not a target). */
 static u32 target_mask(void)
 {
@@ -291,8 +296,10 @@ static ssize_t ctl_write(struct file *file, const char __user *ubuf,
 	char *buf;
 	struct vpnhide_target newt[MAX_TARGET_UIDS];
 	struct vpnhide_prefix_rule newp[MAX_PREFIX_RULES];
+	struct vpnhide_prefix4_rule newp4[MAX_PREFIX4_RULES];
 	int n, dbg;
 	int np = 0;
+	int np4 = 0;
 
 	if (count > PAGE_SIZE)
 		return -EINVAL;
@@ -311,7 +318,8 @@ static ssize_t ctl_write(struct file *file, const char __user *ubuf,
 	 * "unchanged from current", per §4.3. */
 	dbg = READ_ONCE(debug_enabled) ? 1 : 0;
 	n = vpnhide_parse_config_ex(buf, count, newt, MAX_TARGET_UIDS, &dbg,
-				    newp, MAX_PREFIX_RULES, &np);
+				    newp, MAX_PREFIX_RULES, &np, newp4,
+				    MAX_PREFIX4_RULES, &np4);
 	kfree(buf);
 
 	/* A payload with no valid header / a too-new version is rejected
@@ -325,6 +333,9 @@ static ssize_t ctl_write(struct file *file, const char __user *ubuf,
 	memcpy(prefix_rules, newp, (size_t)np * sizeof(*prefix_rules));
 	nr_prefix_rules = np;
 	WRITE_ONCE(prefix_rules_present, np > 0);
+	memcpy(prefix4_rules, newp4, (size_t)np4 * sizeof(*prefix4_rules));
+	nr_prefix4_rules = np4;
+	WRITE_ONCE(prefix4_rules_present, np4 > 0);
 	{
 		u32 mask = 0;
 		int i;
@@ -337,8 +348,8 @@ static ssize_t ctl_write(struct file *file, const char __user *ubuf,
 	WRITE_ONCE(debug_enabled, dbg ? true : false);
 
 	pr_info(MODNAME
-		": config applied — %d targets, %d prefix rules, debug=%d\n",
-		n, np, dbg);
+		": config applied — %d targets, %d prefix rules, %d prefix4 rules, debug=%d\n",
+		n, np, np4, dbg);
 	return count;
 }
 

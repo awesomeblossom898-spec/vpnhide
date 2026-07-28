@@ -112,6 +112,11 @@ static struct vpnhide_stat_entry
 static struct vpnhide_prefix_rule prefix_rules[MAX_PREFIX_RULES];
 static int nr_prefix_rules;
 
+/* Global IPv4 rewrite rules (protocol §4.3 `prefix4` records). Same seqlock
+ * discipline as prefix_rules[]. */
+static struct vpnhide_prefix4_rule prefix4_rules[MAX_PREFIX4_RULES];
+static int nr_prefix4_rules;
+
 /* Global (uid-independent) hook hits — prefix-rule matches fired by non-target
  * UIDs, reported under the VPNHIDE_GLOBAL_STATS_UID sentinel row so they never
  * consume the per-UID slot table or mask a real target's stats. Atomic
@@ -1376,12 +1381,14 @@ static long vpnhide_kpm_ctl0(const char *args, char *__user out_msg, int outlen)
 		 * concurrent ctl0 writer gets -2 (busy) and userspace retries. */
 		struct vpnhide_target new_targets[MAX_TARGET_UIDS];
 		struct vpnhide_prefix_rule new_rules[MAX_PREFIX_RULES];
+		struct vpnhide_prefix4_rule new_rules4[MAX_PREFIX4_RULES];
 		int dbg = -1; /* absent debug record preserves live value */
-		int i, n, nr;
+		int i, n, nr, nr4;
 
 		n = vpnhide_parse_config_ex(args, n_args, new_targets,
 					    MAX_TARGET_UIDS, &dbg, new_rules,
-					    MAX_PREFIX_RULES, &nr);
+					    MAX_PREFIX_RULES, &nr, new_rules4,
+					    MAX_PREFIX4_RULES, &nr4);
 		if (n < 0)
 			return -1; /* rejected whole (bad header / version) */
 		if (!cfg_try_write_begin())
@@ -1392,13 +1399,16 @@ static long vpnhide_kpm_ctl0(const char *args, char *__user out_msg, int outlen)
 		for (i = 0; i < nr; i++)
 			prefix_rules[i] = new_rules[i];
 		nr_prefix_rules = nr;
+		for (i = 0; i < nr4; i++)
+			prefix4_rules[i] = new_rules4[i];
+		nr_prefix4_rules = nr4;
 		active_hook_mask = compute_active_hook_mask(n);
 		if (dbg >= 0)
 			debug_enabled = dbg ? true : false;
 		cfg_write_end();
 		vpnhide_dbg(
-			"ctl0 config: %d targets, %d prefix rules, debug=%d\n",
-			n, nr, debug_enabled ? 1 : 0);
+			"ctl0 config: %d targets, %d prefix rules, %d prefix4 rules, debug=%d\n",
+			n, nr, nr4, debug_enabled ? 1 : 0);
 		return 0;
 	}
 
