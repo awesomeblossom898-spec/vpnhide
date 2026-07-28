@@ -444,11 +444,11 @@ fn absent_canonical_projects_to_empty_config_without_pm() {
 #[test]
 fn pm_ready_check_matches_literal_package_token() {
     assert!(pm_output_has_package(
-        "package:dev.okhsunrog.vpnhide uid:10123\n",
+        "package:dev.privtools.veil uid:10123\n",
         APP_PACKAGE,
     ));
     assert!(!pm_output_has_package(
-        "package:dev.okhsunrog.vpnhide.extra uid:10123\n",
+        "package:dev.privtools.veil.extra uid:10123\n",
         APP_PACKAGE,
     ));
 }
