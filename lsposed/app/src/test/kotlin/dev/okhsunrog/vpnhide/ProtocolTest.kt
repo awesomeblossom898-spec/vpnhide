@@ -209,7 +209,12 @@ class ProtocolTest {
             listOf(Protocol.PrefixRule("rmnet_data1", "24014900000000000000000000000000", 32)),
             requireNotNull(Protocol.parseConfig(withPrefixes)).prefixes,
         )
+    }
+
+    @Test
+    fun configRoundTripsRewrite() {
         // rewrite mode (fake token) + prefix4 round-trip too.
+        val targets = listOf(Protocol.Target(0x27faL, 0x3ffL), Protocol.Target(0x2947L, 0x4L))
         val withRewrite =
             Protocol.formatConfig(
                 debug = false,

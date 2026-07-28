@@ -222,34 +222,39 @@ internal object Protocol {
                 }
 
                 "prefix" -> {
-                    val ifname = toks.getOrNull(1)?.let(::parseIfname)
-                    val addr = toks.getOrNull(2)?.let(::parseAddr32)
-                    val plen = toks.getOrNull(3)?.let { parseHex(it, 32) }
-                    // Optional 4th token: <fake32hex> ⇒ rewrite mode. Present but
-                    // malformed ⇒ skip the whole line (§4.3), never degrade to
-                    // hide. Tokens beyond the fourth are ignored (§4.5).
-                    val fakeTok = toks.getOrNull(4)
-                    val fake = fakeTok?.let(::parseAddr32)
-                    if (ifname != null && addr != null && plen != null && plen <= 128 &&
-                        (fakeTok == null || fake != null)
-                    ) {
-                        prefixes += PrefixRule(ifname, addr, plen, fake)
-                    }
+                    parsePrefixRule(toks)?.let { prefixes += it }
                 }
 
                 "prefix4" -> {
-                    val ifname = toks.getOrNull(1)?.let(::parseIfname)
-                    val addr = toks.getOrNull(2)?.let(::parseAddr8)
-                    val plen = toks.getOrNull(3)?.let { parseHex(it, 32) }
-                    // <fake8hex> is REQUIRED — the record is rewrite-only (§4.3).
-                    val fake = toks.getOrNull(4)?.let(::parseAddr8)
-                    if (ifname != null && addr != null && plen != null && plen <= 32 && fake != null) {
-                        prefixes4 += Prefix4Rule(ifname, addr, plen, fake)
-                    }
+                    parsePrefix4Rule(toks)?.let { prefixes4 += it }
                 }
             }
         }
         return Config(debug, targets, prefixes, prefixes4)
+    }
+
+    /** One `prefix` record, or null to skip the line. The optional 4th token is
+     * <fake32hex> ⇒ rewrite mode; present-but-malformed fake skips the whole
+     * line (§4.3), never degrades to hide. Tokens beyond the fourth are
+     * ignored (§4.5). */
+    private fun parsePrefixRule(toks: List<String>): PrefixRule? {
+        val ifname = toks.getOrNull(1)?.let(::parseIfname) ?: return null
+        val addr = toks.getOrNull(2)?.let(::parseAddr32) ?: return null
+        val plen = toks.getOrNull(3)?.let { parseHex(it, 32) }?.takeIf { it <= 128 } ?: return null
+        val fakeTok = toks.getOrNull(4)
+        val fake = fakeTok?.let(::parseAddr32)
+        if (fakeTok != null && fake == null) return null
+        return PrefixRule(ifname, addr, plen, fake)
+    }
+
+    /** One `prefix4` record, or null to skip the line. <fake8hex> is REQUIRED —
+     * the record is rewrite-only (§4.3). */
+    private fun parsePrefix4Rule(toks: List<String>): Prefix4Rule? {
+        val ifname = toks.getOrNull(1)?.let(::parseIfname) ?: return null
+        val addr = toks.getOrNull(2)?.let(::parseAddr8) ?: return null
+        val plen = toks.getOrNull(3)?.let { parseHex(it, 32) }?.takeIf { it <= 32 } ?: return null
+        val fake = toks.getOrNull(4)?.let(::parseAddr8) ?: return null
+        return Prefix4Rule(ifname, addr, plen, fake)
     }
 
     private fun setTarget(
