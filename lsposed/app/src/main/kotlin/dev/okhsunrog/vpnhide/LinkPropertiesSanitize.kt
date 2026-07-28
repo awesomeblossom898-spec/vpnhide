@@ -118,7 +118,9 @@ internal fun rewriteOnlyValue(
             if (rewriteLinkAddresses(copy, uid)) copy else value
         }
 
-        else -> value
+        else -> {
+            value
+        }
     }
 
 /** Rewrite the LinkProperties inside a callback dispatch bundle for an

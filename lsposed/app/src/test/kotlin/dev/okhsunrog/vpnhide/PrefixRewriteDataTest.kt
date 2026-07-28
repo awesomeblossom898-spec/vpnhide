@@ -8,38 +8,22 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PrefixRewriteDataTest {
+    private fun hex(s: String): ByteArray = s.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
     @Test
     fun `ipv6 literal parser expands full compressed and embedded forms`() {
+        assertArrayEquals(hex("24014900") + ByteArray(12), parseIpv6LiteralBytes("2401:4900::"))
+        assertArrayEquals(ByteArray(15) + 0x01.toByte(), parseIpv6LiteralBytes("::1"))
+        assertArrayEquals(ByteArray(16), parseIpv6LiteralBytes("::"))
+        // 2001:db8:85a3::8a2e:370:7334
         assertArrayEquals(
-            byteArrayOf(0x24, 0x01, 0x49, 0x00) + ByteArray(12),
-            parseIpv6LiteralBytes("2401:4900::"),
-        )
-        assertArrayEquals(
-            ByteArray(15) + 0x01.toByte(),
-            parseIpv6LiteralBytes("::1"),
-        )
-        assertArrayEquals(
-            ByteArray(16),
-            parseIpv6LiteralBytes("::"),
-        )
-        assertArrayEquals(
-            // 2001:db8:85a3::8a2e:370:7334
-            byteArrayOf(
-                0x20, 0x01, 0x0d, 0xb8.toByte(), 0x85.toByte(), 0xa3.toByte(),
-                0, 0, 0, 0, 0x8a.toByte(), 0x2e, 0x03, 0x70, 0x73, 0x34,
-            ),
+            hex("20010db885a3000000008a2e03707334"),
             parseIpv6LiteralBytes("2001:db8:85a3::8a2e:370:7334"),
         )
         // Embedded dotted-quad tail counts as the last two groups.
-        assertArrayEquals(
-            ByteArray(10) + byteArrayOf(0, 0, 1, 2, 3, 4),
-            parseIpv6LiteralBytes("::1.2.3.4"),
-        )
+        assertArrayEquals(ByteArray(10) + byteArrayOf(0, 0, 1, 2, 3, 4), parseIpv6LiteralBytes("::1.2.3.4"))
         // Full 8-group form.
-        assertArrayEquals(
-            ByteArray(14) + byteArrayOf(0xab.toByte(), 0xcd.toByte()),
-            parseIpv6LiteralBytes("0:0:0:0:0:0:0:abcd"),
-        )
+        assertArrayEquals(ByteArray(14) + byteArrayOf(0xab.toByte(), 0xcd.toByte()), parseIpv6LiteralBytes("0:0:0:0:0:0:0:abcd"))
     }
 
     @Test

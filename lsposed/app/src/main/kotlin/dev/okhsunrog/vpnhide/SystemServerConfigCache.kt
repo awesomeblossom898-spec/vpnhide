@@ -116,8 +116,7 @@ internal object SystemServerConfigCache {
      * (uid >= 10000 || shell). Per-app gating would let an untargeted app see
      * the fake natively but the real address via LinkProperties — a within-app
      * contradiction, which is itself a detection vector. Root/system see truth. */
-    fun isRewriteUid(uid: Int): Boolean =
-        uid >= android.os.Process.FIRST_APPLICATION_UID || uid == android.os.Process.SHELL_UID
+    fun isRewriteUid(uid: Int): Boolean = uid >= android.os.Process.FIRST_APPLICATION_UID || uid == android.os.Process.SHELL_UID
 
     private fun Cache.withNextCheck(now: Long): Cache = copy(nextStatCheckUptimeMs = nextStatCheck(now))
 
