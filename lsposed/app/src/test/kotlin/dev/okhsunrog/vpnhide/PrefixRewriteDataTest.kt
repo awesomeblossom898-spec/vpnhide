@@ -117,11 +117,14 @@ class PrefixRewriteDataTest {
     }
 
     @Test
-    fun `canonical v4 rule resolves with contained fake`() {
+    fun `canonical v4 rule resolves with any parseable fake`() {
         val rule = CanonicalIpv4Rule("ccmni0", "100.64.0.0", 10, "100.87.23.45").toRewriteRuleOrNull()
         assertEquals("ccmni0", rule?.iface)
         assertArrayEquals(parseIpv4QuadBytes("100.87.23.45"), rule?.fakeBytes)
-        assertNull(CanonicalIpv4Rule("ccmni0", "100.64.0.0", 10, "192.168.0.1").toRewriteRuleOrNull())
+        // No containment: any unicast fake resolves (proxy-exit sync).
+        val escaped = CanonicalIpv4Rule("ccmni0", "100.64.0.0", 10, "192.168.0.1").toRewriteRuleOrNull()
+        assertArrayEquals(parseIpv4QuadBytes("192.168.0.1"), escaped?.fakeBytes)
+        // Malformed fake is still dropped.
         assertNull(CanonicalIpv4Rule("ccmni0", "100.64.0.0", 10, "junk").toRewriteRuleOrNull())
     }
 

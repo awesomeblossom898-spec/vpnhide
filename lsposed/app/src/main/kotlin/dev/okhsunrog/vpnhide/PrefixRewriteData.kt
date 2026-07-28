@@ -69,11 +69,12 @@ internal fun CanonicalIpv6PrefixRule.toRewriteRuleOrNull(): PrefixRewriteRule? {
 }
 
 /** A rewrite rule from a canonical v4 rule (rewrite-only by schema), or null
- * when malformed. */
+ * when malformed. NO containment requirement: a v4 fake may be any unicast
+ * address (e.g. the proxy exit IP under Veil's exit-sync) — plausibility is
+ * the editor's concern; the matcher rewrites whatever the config carries. */
 internal fun CanonicalIpv4Rule.toRewriteRuleOrNull(): PrefixRewriteRule? {
     val prefixBytes = parseIpv4QuadBytes(prefix) ?: return null
     val fakeBytes = parseIpv4QuadBytes(fake) ?: return null
-    if (!topBitsEqual(prefixBytes, fakeBytes, prefixLen)) return null
     return PrefixRewriteRule(iface, prefixBytes, prefixLen, fakeBytes)
 }
 

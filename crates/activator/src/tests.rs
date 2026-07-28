@@ -809,10 +809,18 @@ fn ipv4_rule_validation_rejects_bad_entries() {
         )
         .is_err(),
     );
-    // Fake outside the rule prefix (100.87.x is inside /10; 192.168.x is not).
+    // Fake outside the rule prefix is ACCEPTED: v4 fakes may be any unicast
+    // address (proxy-exit sync), containment is an editor-level concern only.
     assert!(
         parse_canonical(
             r#"{ "ipv4Rules": [ { "iface": "ccmni1", "prefix": "100.64.0.0", "prefixLen": 10, "fake": "192.168.1.7" } ] }"#,
+        )
+        .is_ok(),
+    );
+    // Fake that doesn't parse as IPv4 is still a hard error.
+    assert!(
+        parse_canonical(
+            r#"{ "ipv4Rules": [ { "iface": "ccmni1", "prefix": "100.64.0.0", "prefixLen": 10, "fake": "not-an-ip" } ] }"#,
         )
         .is_err(),
     );

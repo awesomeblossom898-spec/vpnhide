@@ -438,7 +438,7 @@ fn validate_ipv6_prefix_rules(cfg: &CanonicalConfig) -> Result<()> {
 fn validate_ipv4_rules(cfg: &CanonicalConfig) -> Result<()> {
     for rule in &cfg.ipv4_rules {
         validate_iface(&rule.iface, "ipv4Rules.iface")?;
-        let prefix_addr = match rule.prefix.parse::<std::net::Ipv4Addr>() {
+        let _prefix_addr = match rule.prefix.parse::<std::net::Ipv4Addr>() {
             Ok(addr) => addr,
             Err(_) => {
                 return Err(format!(
@@ -453,7 +453,7 @@ fn validate_ipv4_rules(cfg: &CanonicalConfig) -> Result<()> {
                 format!("{}: ipv4Rules.prefixLen must be within 0..=32", rule.iface).into(),
             );
         }
-        let fake_addr = match rule.fake.parse::<std::net::Ipv4Addr>() {
+        let _fake_addr = match rule.fake.parse::<std::net::Ipv4Addr>() {
             Ok(addr) => addr,
             Err(_) => {
                 return Err(
@@ -461,13 +461,11 @@ fn validate_ipv4_rules(cfg: &CanonicalConfig) -> Result<()> {
                 );
             }
         };
-        if !top_bits_equal(&prefix_addr.octets(), &fake_addr.octets(), rule.prefix_len) {
-            return Err(format!(
-                "{}: ipv4Rules.fake must keep the rule prefix (first {} bits of {})",
-                rule.fake, rule.prefix_len, rule.prefix
-            )
-            .into());
-        }
+        // No containment requirement for v4 fakes: the fake may be ANY unicast
+        // address — e.g. the proxy exit IP when Veil's exit-sync drives the
+        // rules, so the app-visible local address always matches the exit the
+        // server sees. Plausibility (CGNAT range for manual fakes) is the
+        // editor's concern; the wire/kernel never needed the invariant.
     }
     Ok(())
 }

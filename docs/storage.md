@@ -184,12 +184,16 @@ schema.
 `ipv4Rules` (optional, top-level) holds the IPv4 siblings — **rewrite-only**,
 because hiding the device's only v4 address would wedge networking. Each entry
 is `{ "iface", "prefix", "prefixLen", "fake" }`: `prefix`/`fake` in dotted
-quad, `prefixLen` 0..32, `fake` required and contained in the rule prefix. At
-most 4 rules (activator warns and truncates beyond that). The intended use is
-CGNAT blinding on cellular: `{ "iface": "ccmni1", "prefix": "100.64.0.0",
-"prefixLen": 10, "fake": "100.87.23.45" }` shows apps a different address
-inside the same carrier-grade range — never an RFC1918 address, which would
-be a detection signal of its own on a cellular interface. The same reader-uid
+quad, `prefixLen` 0..32, `fake` required and **any unicast address** — no
+containment requirement (relaxed for proxy-exit sync, where the fake tracks
+the tunnel egress IP so app-visible local address always matches the
+server-seen exit). At most 4 rules (activator warns and truncates beyond
+that). The intended manual use is CGNAT blinding on cellular:
+`{ "iface": "ccmni1", "prefix": "100.64.0.0", "prefixLen": 10, "fake":
+"100.87.23.45" }` shows apps a different address inside the same carrier-grade
+range — editors still validate that shape for hand-entered fakes (an RFC1918
+fake would be a detection signal of its own on a cellular interface); the
+wire/kernel layers accept whatever the config carries. The same reader-uid
 gate applies (apps + shell see the fake; root/system/telephony see the truth,
 so IMS/VoLTE provisioning is untouched). v4 routes are **not** rewritten (the
 CGNAT range is shared-carrier infrastructure; route-dst correlation is a v6
