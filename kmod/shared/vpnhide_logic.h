@@ -612,6 +612,80 @@ static inline int vpnhide_tok_addr8(const char *b, unsigned long ts,
 }
 
 /*
+ * Render 16 network-order bytes as exactly 32 lowercase hex chars (§4.3
+ * write-side normalization — the same spelling /proc/net/if_inet6 uses).
+ * `out` must hold 32 bytes; no NUL is written — seq-file rewrites substitute
+ * in place inside an existing line.
+ */
+static inline void vpnhide_hex32_render(char *out, const unsigned char addr[16])
+{
+	static const char hexd[] = "0123456789abcdef";
+	int i;
+
+	for (i = 0; i < 16; i++) {
+		out[2 * i] = hexd[(addr[i] >> 4) & 0xf];
+		out[2 * i + 1] = hexd[addr[i] & 0xf];
+	}
+}
+
+/*
+ * Walk the rtattr chain in region[0,len) starting at offset `hdr_len` (just
+ * past the ifaddrmsg/rtmsg header); for every attr of type `rta_type` whose
+ * payload is exactly `addrlen` bytes and equals `real`, overwrite the payload
+ * with `fake`. Same-length substitution only — no nlmsg/rtattr length ever
+ * changes, so the skb needs zero fixups.
+ *
+ * Compare-before-overwrite: IFA_LOCAL always equals the real local address,
+ * while IFA_ADDRESS may carry the point-to-point peer instead — comparing
+ * first rewrites exactly the occurrences of the real address and never the
+ * peer. rtattr fields are native-endian u16; GKI arm64 is little-endian and
+ * this header never runs elsewhere. Returns the overwrite count. Stops at the
+ * first malformed attr rather than wandering the buffer.
+ */
+static inline int vpnhide_rtattr_replace(unsigned char *region,
+					 unsigned long len, unsigned long hdr_len,
+					 unsigned short rta_type,
+					 const unsigned char *real,
+					 const unsigned char *fake,
+					 unsigned long addrlen)
+{
+	unsigned long off = hdr_len;
+	int n = 0;
+
+	if (!region || !real || !fake || addrlen == 0)
+		return 0;
+	while (off + 4 <= len) {
+		unsigned int alen = (unsigned int)region[off] |
+				    ((unsigned int)region[off + 1] << 8);
+		unsigned int atype = (unsigned int)region[off + 2] |
+				     ((unsigned int)region[off + 3] << 8);
+		unsigned long payload, plen, aligned, i;
+
+		if (alen < 4) /* malformed — stop */
+			break;
+		payload = off + 4;
+		plen = (unsigned long)alen - 4;
+		if (payload + plen > len)
+			break;
+		if (atype == (unsigned int)rta_type && plen == addrlen) {
+			for (i = 0; i < addrlen; i++)
+				if (region[payload + i] != real[i])
+					break;
+			if (i == addrlen) {
+				for (i = 0; i < addrlen; i++)
+					region[payload + i] = fake[i];
+				n++;
+			}
+		}
+		aligned = ((unsigned long)alen + 3UL) & ~3UL; /* RTA_ALIGN(4) */
+		if (aligned == 0 || off + aligned <= off)
+			break;
+		off += aligned;
+	}
+	return n;
+}
+
+/*
  * Copy an interface-name token [ts,te) into dst[VPNHIDE_IFNAMSIZ]. Empty, or
  * too long to hold a NUL (>= IFNAMSIZ) → 0 (reject the line).
  */
@@ -707,19 +781,26 @@ static inline int vpnhide_streq(const char *a, const char *b)
 }
 
 /*
- * Compact /proc/net/if_inet6 lines in place. Each line is
+ * Compact /proc/net/if_inet6 (and /proc/net/ipv6_route) lines in place. Each
+ * line is
  *   "<32-hex addr> <ifindex> <plen> <scope> <flags> <devname>"
- * (address = FIRST field, devname = LAST field). A line is dropped when
- * `vpn_match` is non-NULL and matches devname (per-uid VPN hiding), OR when any
- * rule matches (devname equals rule->ifname AND the address is within the
- * rule's prefix — global). Same down-only in-place copy as
+ * (address = FIRST field, devname = LAST field; ipv6_route lines share both
+ * shapes — route destination first, devname last). A line is dropped when
+ * `vpn_match` is non-NULL and matches devname (per-uid VPN hiding), OR when a
+ * HIDE-mode rule matches (devname equals rule->ifname AND the address is
+ * within the rule's prefix — global). A REWRITE-mode rule match instead
+ * overwrites the 32-hex address field in place with the fake (exactly 32 hex
+ * chars, so the line length never changes): verbatim for addresses, or — when
+ * `route_compose` is non-zero (ipv6_route destinations) — with the fake's top
+ * 64 bits over the original destination's low 64 bits, preserving
+ * address↔route correlation (§4.3). Same down-only in-place copy as
  * vpnhide_compact_seq_lines, so a forward byte loop is safe. Returns new length.
  */
 static inline unsigned long
 vpnhide_compact_if_inet6_lines(char *buf, unsigned long start,
 			       unsigned long count, vpnhide_match_fn vpn_match,
 			       const struct vpnhide_prefix_rule *rules,
-			       int nr_rules)
+			       int nr_rules, int route_compose)
 {
 	unsigned long src = start;
 	unsigned long dst = start;
@@ -732,7 +813,7 @@ vpnhide_compact_if_inet6_lines(char *buf, unsigned long start,
 		unsigned long line_end, line_len, fs, fe, ts, te;
 		unsigned char addr[16];
 		char ifname[VPNHIDE_IFNAMSIZ];
-		int have_addr, have_name, hide = 0, i;
+		int have_addr, have_name, hide = 0, rwr = 0, rwr_idx = 0, i;
 
 		while (nl < count && buf[nl] != '\n')
 			nl++;
@@ -769,7 +850,13 @@ vpnhide_compact_if_inet6_lines(char *buf, unsigned long start,
 							  rules[i].ifname) &&
 					    vpnhide_prefix_match(addr,
 								 &rules[i])) {
-						hide = 1;
+						if (rules[i].mode ==
+						    VPNHIDE_RULE_REWRITE) {
+							rwr = 1;
+							rwr_idx = i;
+						} else {
+							hide = 1;
+						}
 						break;
 					}
 				}
@@ -780,6 +867,31 @@ vpnhide_compact_if_inet6_lines(char *buf, unsigned long start,
 			src = line_end;
 			continue;
 		}
+
+		/* Rewrite: overwrite the 32-hex address field in place (the
+		 * line length is unchanged, so the copy-down below stays a
+		 * no-op for this line). tok_addr32 accepted the field, so it
+		 * is exactly 32 chars. */
+		if (rwr && fe - fs == 32) {
+			char fakehex[32];
+			unsigned long j;
+
+			if (route_compose) {
+				unsigned char dstb[16];
+
+				for (j = 0; j < 8; j++)
+					dstb[j] = rules[rwr_idx].fake[j];
+				for (j = 8; j < 16; j++)
+					dstb[j] = addr[j];
+				vpnhide_hex32_render(fakehex, dstb);
+			} else {
+				vpnhide_hex32_render(fakehex,
+						     rules[rwr_idx].fake);
+			}
+			for (j = 0; j < 32; j++)
+				buf[fs + j] = fakehex[j];
+		}
+
 		if (dst != src) {
 			unsigned long k;
 

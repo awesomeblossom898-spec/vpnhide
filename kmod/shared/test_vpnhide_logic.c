@@ -265,7 +265,7 @@ static void test_compact_if_inet6(void)
 	 * the global v6 on rmnet_data1 goes; rmnet_data3 (same prefix, other iface)
 	 * and the fe80 link-local on rmnet_data1 (not in 2401:4900::/32) stay. */
 	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf),
-					   (vpnhide_match_fn)0, rules, 1);
+					   (vpnhide_match_fn)0, rules, 1, 0);
 	buf[n] = '\0';
 	expect_str(
 		"if_inet6: rmnet_data1 global v6 removed", buf,
@@ -293,7 +293,7 @@ static void test_compact_if_inet6_vpn_and_edges(void)
 	rules[0].prefix_len = 32;
 
 	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf), match_vpn,
-					   rules, 1);
+					   rules, 1, 0);
 	buf[n] = '\0';
 	expect_str(
 		"if_inet6: vpn tun0 + prefix removed, no-trailing-newline kept",
@@ -311,7 +311,7 @@ static void test_compact_if_inet6_vpn_and_edges(void)
 			"24014900a3f1e04d54fdd7fffeb173bf 1e 40 00 00 rmnet_data1\n");
 		unsigned long m = vpnhide_compact_if_inet6_lines(
 			buf2, start, strlen(buf2), match_vpn,
-			(const struct vpnhide_prefix_rule *)0, 0);
+			(const struct vpnhide_prefix_rule *)0, 0, 0);
 
 		buf2[m] = '\0';
 		expect_str(
@@ -352,7 +352,7 @@ static void test_compact_ipv6_route_prefix(void)
 	 * NO trailing newline and is dropped, so the kept lines' original
 	 * bytes (with their newlines) survive verbatim. */
 	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf),
-					   (vpnhide_match_fn)0, rules, 1);
+					   (vpnhide_match_fn)0, rules, 1, 1);
 	buf[n] = '\0';
 	expect_str(
 		"ipv6_route: prefix-dest routes removed, link/mcast/other-iface kept",
@@ -360,6 +360,213 @@ static void test_compact_ipv6_route_prefix(void)
 		"fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n"
 		"24014900a41fb57c0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data3\n"
 		"ff000000000000000000000000000000 08 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n");
+}
+
+/* Fill a rule with the stock 2401:4900::/32 fixture (mode + fake set by the
+ * caller). */
+static void fill_prefix_fixture(struct vpnhide_prefix_rule *r,
+				const char *ifname)
+{
+	memset(r, 0, sizeof(*r));
+	strcpy(r->ifname, ifname);
+	r->addr[0] = 0x24;
+	r->addr[1] = 0x01;
+	r->addr[2] = 0x49;
+	r->addr[3] = 0x00;
+	r->prefix_len = 32;
+}
+
+/* 2401:4900:7f3a:9c21:5e88:1b4d:a2f0:6c19 — the fixture fake. */
+static void fill_fake_fixture(unsigned char fake[16])
+{
+	static const unsigned char f[16] = { 0x24, 0x01, 0x49, 0x00, 0x7f, 0x3a,
+					     0x9c, 0x21, 0x5e, 0x88, 0x1b, 0x4d,
+					     0xa2, 0xf0, 0x6c, 0x19 };
+
+	memcpy(fake, f, 16);
+}
+
+static void test_hex32_render(void)
+{
+	unsigned char addr[16];
+	char out[33];
+
+	fill_fake_fixture(addr);
+	vpnhide_hex32_render(out, addr);
+	out[32] = '\0';
+	expect_str("hex32_render lowercase 32 chars", out,
+		   "240149007f3a9c215e881b4da2f06c19");
+}
+
+static void test_prefix4_match(void)
+{
+	struct vpnhide_prefix4_rule r;
+	unsigned char a[4];
+
+	/* 100.64.0.0/10 (CGNAT) */
+	memset(&r, 0, sizeof(r));
+	strcpy(r.ifname, "ccmni1");
+	r.addr[0] = 100;
+	r.addr[1] = 64;
+	r.prefix_len = 10;
+
+	a[0] = 100;
+	a[1] = 124;
+	a[2] = 146;
+	a[3] = 11; /* 100.124.146.11 — in /10 */
+	expect_int("prefix4 /10 in", vpnhide_prefix4_match(a, &r), 1);
+	a[1] = 127; /* 100.127.x — top of /10 */
+	expect_int("prefix4 /10 top", vpnhide_prefix4_match(a, &r), 1);
+	a[1] = 128; /* 100.128.x — just outside /10 */
+	expect_int("prefix4 /10 out", vpnhide_prefix4_match(a, &r), 0);
+	a[0] = 192;
+	a[1] = 168; /* 192.168.x — far outside */
+	expect_int("prefix4 192.168 out", vpnhide_prefix4_match(a, &r), 0);
+	r.prefix_len = 33; /* out-of-range rejects */
+	expect_int("prefix4 /33 reject", vpnhide_prefix4_match(a, &r), 0);
+}
+
+static void test_compact_if_inet6_rewrite(void)
+{
+	/* REWRITE mode: the matched line is KEPT and its 32-hex address field
+	 * overwritten with the fake — same length, so the return value equals
+	 * the input length. Other-iface and out-of-prefix lines stay verbatim. */
+	char buf[512] =
+		"24014900a3f1e04d54fdd7fffeb173bf 1e 40 00 00 rmnet_data1\n"
+		"24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3\n"
+		"fe800000000000005042d7fffe000001 1e 40 20 80 rmnet_data1\n";
+	struct vpnhide_prefix_rule rules[1];
+	unsigned long n;
+
+	fill_prefix_fixture(&rules[0], "rmnet_data1");
+	rules[0].mode = VPNHIDE_RULE_REWRITE;
+	fill_fake_fixture(rules[0].fake);
+
+	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf),
+					   (vpnhide_match_fn)0, rules, 1, 0);
+	buf[n] = '\0';
+	expect_str(
+		"if_inet6 rewrite: addr substituted, all lines kept", buf,
+		"240149007f3a9c215e881b4da2f06c19 1e 40 00 00 rmnet_data1\n"
+		"24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3\n"
+		"fe800000000000005042d7fffe000001 1e 40 20 80 rmnet_data1\n");
+	expect_int("if_inet6 rewrite: length unchanged", (int)n,
+		   (int)strlen(
+			   "240149007f3a9c215e881b4da2f06c19 1e 40 00 00 rmnet_data1\n"
+			   "24014900a41fb57cf4d296fffecd4b63 20 40 00 00 rmnet_data3\n"
+			   "fe800000000000005042d7fffe000001 1e 40 20 80 rmnet_data1\n"));
+}
+
+static void test_compact_ipv6_route_rewrite(void)
+{
+	/* REWRITE with route_compose=1: the destination's top 64 bits become
+	 * the fake's; the original low 64 survive. */
+	char buf[640] =
+		"24014900a3f1e04d0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n"
+		"fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n"
+		"24014900a41fb57c0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data3\n";
+	struct vpnhide_prefix_rule rules[1];
+	unsigned long n;
+
+	fill_prefix_fixture(&rules[0], "rmnet_data1");
+	rules[0].mode = VPNHIDE_RULE_REWRITE;
+	fill_fake_fixture(rules[0].fake);
+
+	n = vpnhide_compact_if_inet6_lines(buf, 0, strlen(buf),
+					   (vpnhide_match_fn)0, rules, 1, 1);
+	buf[n] = '\0';
+	expect_str(
+		"ipv6_route rewrite: top-64 compose, other lines kept", buf,
+		"240149007f3a9c210000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n"
+		"fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data1\n"
+		"24014900a41fb57c0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 100 0 0 1 rmnet_data3\n");
+}
+
+static void expect_mem(const char *what, const unsigned char *got,
+		       const unsigned char *want, unsigned long n)
+{
+	if (memcmp(got, want, n) != 0) {
+		fprintf(stderr, "FAIL %s: %d bytes differ\n", what, (int)n);
+		failures++;
+	}
+}
+
+static void test_rtattr_replace(void)
+{
+	/* Synthetic ifaddrmsg region: 8 header bytes, then
+	 *   A: IFA_LOCAL(2)  len=20 payload=real16
+	 *   B: IFA_ADDRESS(1) len=20 payload=real16
+	 *   C: IFA_ADDRESS(1) len=20 payload=peer16 (must survive)
+	 *   D: malformed (rta_len=2) — the walker must stop here. */
+	unsigned char buf[96];
+	unsigned char real[16], fake[16], peer[16];
+	unsigned long off;
+	int n;
+
+	memset(buf, 0, sizeof(buf));
+	fill_fake_fixture(fake);
+	memcpy(real, fake, 16);
+	real[15] ^= 0xff; /* real != fake */
+	memcpy(peer, fake, 16);
+	peer[15] ^= 0x01; /* peer != real */
+
+	/* A */
+	off = 8;
+	buf[off] = 20;
+	buf[off + 2] = 2; /* IFA_LOCAL */
+	memcpy(buf + off + 4, real, 16);
+	/* B */
+	off += 20;
+	buf[off] = 20;
+	buf[off + 2] = 1; /* IFA_ADDRESS */
+	memcpy(buf + off + 4, real, 16);
+	/* C */
+	off += 20;
+	buf[off] = 20;
+	buf[off + 2] = 1; /* IFA_ADDRESS (peer) */
+	memcpy(buf + off + 4, peer, 16);
+	/* D */
+	off += 20;
+	buf[off] = 2; /* malformed: rta_len < 4 */
+
+	/* IFA_LOCAL pass: replaces A only. */
+	n = vpnhide_rtattr_replace(buf, sizeof(buf), 8, 2, real, fake, 16);
+	expect_int("rtattr IFA_LOCAL count", n, 1);
+	expect_mem("rtattr IFA_LOCAL bytes", buf + 8 + 4, fake, 16);
+	expect_mem("rtattr IFA_ADDRESS still real", buf + 28 + 4, real, 16);
+	/* IFA_ADDRESS pass: replaces B, leaves peer C. */
+	n = vpnhide_rtattr_replace(buf, sizeof(buf), 8, 1, real, fake, 16);
+	expect_int("rtattr IFA_ADDRESS count", n, 1);
+	expect_mem("rtattr IFA_ADDRESS bytes", buf + 28 + 4, fake, 16);
+	expect_mem("rtattr peer preserved", buf + 48 + 4, peer, 16);
+
+	/* v4 sub-case: a 4-byte needle inside a DIFFERENT attr type
+	 * (IFA_CACHEINFO-shaped) must not be touched; the same needle in an
+	 * IFA_LOCAL-shaped attr is replaced. A trailing malformed attr stops
+	 * the walk. */
+	{
+		unsigned char b4[64];
+		unsigned char real4[4] = { 100, 124, 146, 11 };
+		unsigned char fake4[4] = { 100, 87, 23, 45 };
+
+		memset(b4, 0, sizeof(b4));
+		/* IFA_LOCAL(2), len=8, payload=real4 */
+		b4[8] = 8;
+		b4[10] = 2;
+		memcpy(b4 + 12, real4, 4);
+		/* IFA_CACHEINFO(6), len=20, payload starts with the needle */
+		b4[16] = 20;
+		b4[18] = 6;
+		memcpy(b4 + 20, real4, 4);
+		/* malformed terminator */
+		b4[36] = 1;
+
+		n = vpnhide_rtattr_replace(b4, sizeof(b4), 8, 2, real4, fake4,
+					   4);
+		expect_int("rtattr v4 count", n, 1);
+		expect_mem("rtattr v4 replaced", b4 + 12, fake4, 4);
+		expect_mem("rtattr cacheinfo untouched", b4 + 20, real4, 4);
+	}
 }
 
 int main(void)
@@ -376,6 +583,11 @@ int main(void)
 	test_compact_if_inet6();
 	test_compact_if_inet6_vpn_and_edges();
 	test_compact_ipv6_route_prefix();
+	test_hex32_render();
+	test_prefix4_match();
+	test_compact_if_inet6_rewrite();
+	test_compact_ipv6_route_rewrite();
+	test_rtattr_replace();
 
 	if (failures) {
 		fprintf(stderr, "%d test(s) failed\n", failures);

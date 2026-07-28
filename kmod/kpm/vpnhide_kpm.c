@@ -112,7 +112,11 @@ static struct vpnhide_stat_entry
 static struct vpnhide_prefix_rule prefix_rules[MAX_PREFIX_RULES];
 static int nr_prefix_rules;
 
-/* Global IPv4 rewrite rules (protocol §4.3 `prefix4` records). Same seqlock
+/* Global IPv4 rewrite rules (protocol §4.3 `prefix4` records). Parsed and
+ * stored for wire compatibility, but the KPM has NO v4 read path that consumes
+ * them (no in_ifaddr.ifa_local offset in the table, and no skb->data offset
+ * for rtattr rewrites) — they are inert here, i.e. fail-open, exactly the
+ * mixed-version matrix's "old backend" behavior (§4.5). Same seqlock
  * discipline as prefix_rules[]. */
 static struct vpnhide_prefix4_rule prefix4_rules[MAX_PREFIX4_RULES];
 static int nr_prefix4_rules;
@@ -358,7 +362,14 @@ static int kpm_prefix_rule_hit(const char *ifname, const unsigned char *addr)
 
 /* Snapshot the prefix rules under the seqlock (even-seq reads, retry on a
  * concurrent write) and return the count. Byte-wise copy: the KP build
- * environment has no guaranteed memcpy (same idiom as iface_is_vpn). */
+ * environment has no guaranteed memcpy (same idiom as iface_is_vpn).
+ *
+ * REWRITE-mode rules are forced to HIDE in the snapshot: the KPM has no
+ * skb->data offset (needed to overwrite rtattrs in a filled skb) and cannot
+ * verify one per-KMI from here, so it degrades every v6 rewrite rule to hide
+ * on all of its paths — the documented "old backend" profile of the
+ * mixed-version matrix (§4.5), kept consistent so no two KPM-covered paths
+ * can disagree. Only the .ko implements rewrite. */
 static int kpm_snapshot_prefix_rules(struct vpnhide_prefix_rule *snap)
 {
 	uint32_t s1, s2 = 0;
@@ -375,6 +386,7 @@ static int kpm_snapshot_prefix_rules(struct vpnhide_prefix_rule *snap)
 
 			for (j = 0; j < (int)sizeof(*snap); j++)
 				dst[j] = src[j];
+			snap[i].mode = VPNHIDE_RULE_HIDE;
 		}
 		s2 = __atomic_load_n(&cfg_seq, __ATOMIC_ACQUIRE);
 	} while (s1 != s2);
@@ -528,9 +540,11 @@ static void ipv6_route_after(hook_fargs2_t *fargs, void *udata)
 		/* /proc/net/ipv6_route keeps the route destination in the FIRST
 		 * field and the iface name in the LAST — the same two fields the
 		 * if_inet6 compactor tokenizes, so it doubles as the route
-		 * compactor (host-test-pinned in the .ko's suite). */
+		 * compactor (host-test-pinned in the .ko's suite). The snapshot
+		 * above forced every rule to HIDE mode, so route_compose never
+		 * fires here — the KPM degrades rewrite to hide consistently. */
 		unsigned long next = vpnhide_compact_if_inet6_lines(
-			buf, start, old, vpn_match, snap, nr);
+			buf, start, old, vpn_match, snap, nr, 1);
 
 		*countp = next;
 		if (next != old) {
@@ -724,7 +738,11 @@ static void *deref2(void *base, unsigned int off1, unsigned int off2)
 /* The v4 addr-fill before-hook (inet6_fill_before is standalone — it also
  * runs the global prefix path; addr_fill_after_hook below remains genuinely
  * shared by both addr-fill hooks): stash skb + len if ifa's dev is VPN. The
- * caller passes the hook id so the per-hook gate (§4.3) is per-hook. */
+ * caller passes the hook id so the per-hook gate (§4.3) is per-hook.
+ * v4 stays per-uid only here: prefix4 (v4 rewrite) rules are parsed for wire
+ * compatibility but not consumed by the KPM (no in_ifaddr.ifa_local offset,
+ * no skb->data offset — see the prefix4_rules declaration), i.e. fail-open
+ * per the mixed-version matrix (§4.5). */
 static void addr_fill_before(hook_fargs4_t *fargs, void *dev, uint32_t hook_id)
 {
 	void *skb = (void *)fargs->arg0;
