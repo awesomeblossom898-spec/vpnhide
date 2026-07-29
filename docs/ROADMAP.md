@@ -75,11 +75,11 @@ split-tunnel setup resolves to the physical interface anyway.
 
 Follow-up work (low priority):
 
-- If single-lookup concealment is ever wanted, hook the global `rtnl_unicast`
-  (ABI-stable, runs in caller context) — the choke point for every
-  single-reply rtnetlink response, IPv4 and IPv6 — and rewrite `RTA_OIF` in
-  the reply skb to a physical ifindex, instead of reading a fixed register
-  off the static `rt_fill_info`.
+- ~~If single-lookup concealment is ever wanted, hook the global
+  `rtnl_unicast`~~ **Done 2026-07-29** (hook id 28): the kmod hooks
+  `rtnl_unicast` and rewrites `RTA_OIF`-resolved route addresses per
+  payload (DST/GATEWAY/PREFSRC) for single `RTM_GETROUTE` replies —
+  `ip route get` shows the fake via+src like the dump paths.
 
 ### 32-bit (compat) SIOCGIFCONF enumeration (low priority)
 

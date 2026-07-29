@@ -416,7 +416,7 @@ config (app → kernel):
 ```
 vpnhide 1 config
 debug 0
-target 0x27fa 0x20003ff
+target 0x27fa 0x1e0003ff
 target 0x2947 0x004
 prefix ccmni1 24014900000000000000000000000000 0x20 240149007f3a9c215e881b4da2f06c19
 prefix rmnet_data1 24014900000000000000000000000000 0x20
@@ -476,7 +476,7 @@ libc hooks (7): `zygisk_ioctl`, `zygisk_getifaddrs`, `zygisk_openat`,
 `zygisk_recvfrom_chk`.
 
 The registry codegen emits two kernel-owned masks for this split:
-`KERNEL_HOOK_MASK` (`0x20003ff`, the `.ko` set) and `KPM_HOOK_MASK` (`0x3ff`).
+`KERNEL_HOOK_MASK` (`0x1e0003ff`, the `.ko` set) and `KPM_HOOK_MASK` (`0x3ff`).
 A kernel backend judges `partial_hooks` against its own owned mask, ignoring
 bits it does not own.
 
@@ -519,7 +519,7 @@ the only writer of all profiles; each backend reads its own.
 | LSPosed | `debug`, `target` (lsposed-owned mask bits, incl. package visibility) | yes | yes |
 
 A backend ignores `target` mask bits it does not own (`mask & own_hooks`), so the
-same `target 0x27fa 0x20003ff` line is valid on every channel and each backend takes
+same `target 0x27fa 0x1e0003ff` line is valid on every channel and each backend takes
 its slice.
 
 **Active vs idle (§1.5).** The grammar is the same on every channel, but the app
@@ -612,7 +612,7 @@ Write (multi-line payload as one argv argument):
 ```
 kpatch kpm ctl0 vpnhide "vpnhide 1 config
 debug 0
-target 0x27fa 0x20003ff
+target 0x27fa 0x1e0003ff
 target 0x2947 0x004"
 ```
 

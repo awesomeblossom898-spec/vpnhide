@@ -228,11 +228,22 @@ no buffer accounting changes anywhere. On KPM the v6 rewrite **degrades to
 hide** (no `skb->data` offset is verifiable per-KMI for the in-place edit) and
 `prefix4` is inert — a deliberate fail-consistent profile: an app sees either
 the fake everywhere or nothing anywhere, never a mix. Accepted residuals,
-unchanged from hide mode: `getsockname` on an already-bound socket,
-`/proc/net/tcp*` (above), single-shot `rt_fill_info` (intentionally unhooked),
-KPM's `if_inet6` gap (the address simply stays visible there — same as hide
-mode today), and `RTA_MULTIPATH` nexthop payloads (no Android carrier uses
-multipath on device routes).
+unchanged from hide mode: `/proc/net/tcp*` (above), single-shot
+`rt_fill_info` (intentionally unhooked), KPM's `if_inet6` gap (the address
+simply stays visible there — same as hide mode today), and `RTA_MULTIPATH`
+nexthop payloads (no Android carrier uses multipath on device routes).
+
+`getsockname` is **covered** since 2026-07-29 (hooks `inet_getname` /
+`inet6_getname`, app/shell readers only): the exit handler rewrites the
+kernel sockaddr buffer in place — AF_INET via prefix4 rules, v4-mapped
+`::ffff:a.b.c.d` tails the same way (Android sockets are PF_INET6 with
+V6ONLY off, so a plain v4 connect lands here, not in the AF_INET branch),
+native v6 composed fake-top-64 + real-IID through a real→fake /64 map the
+netlink path teaches (per-iface fakes mean first-rule match would hand out
+the wrong iface's /64 — a cross-path tell). Three ABI traps fixed along
+the way: `inet_getname` is 3-arg since 4.17 (peer is x2, not x3), success
+returns the sockaddr LENGTH (gate `>= 0`, not `== 0`), and the v4-mapped
+case needs the prefix4 lookup on `s6_addr + 12`.
 
 ### 3D. Framework network APIs (Java) — lsposed territory
 
