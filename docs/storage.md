@@ -335,7 +335,7 @@ emits status+stats (from separate counters). Example on the kmod node:
 
 ```sh
 # write config (kind=config) — kernel parses into targets[]+debug, nothing echoed
-# printf 'vpnhide 1 config\ndebug 0\ntarget 0x27fa 0x20003ff\n' > /proc/vpnhide_ctl
+# printf 'vpnhide 1 config\ndebug 0\ntarget 0x27fa 0x1e0003ff\n' > /proc/vpnhide_ctl
 
 # read status+stats (kind=status, kind=stats) — never returns the config you wrote
 # cat /proc/vpnhide_ctl
