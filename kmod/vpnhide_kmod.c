@@ -2043,7 +2043,10 @@ static int getname_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 
 	if (!data->uaddr)
 		return 0;
-	if ((long)regs_return_value(regs) != 0)
+	/* Success is a non-negative sockaddr LENGTH (16/28), not 0 — the
+	 * 4.17 getname refactor returns the filled length and the syscall
+	 * copies that many bytes to userspace. Negative is -errno: skip. */
+	if ((long)regs_return_value(regs) < 0)
 		return 0;
 	getname_rewrite(data->uaddr);
 	return 0;
