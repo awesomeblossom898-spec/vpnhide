@@ -1933,8 +1933,10 @@ static struct kretprobe fib_rule_fill_krp = {
 /*  Hooks 12/13: inet_getname / inet6_getname — getsockname(2)         */
 /*                                                                    */
 /*  int inet_getname(struct socket *sock, struct sockaddr *uaddr,      */
-/*                   int *addr_len, int peer)                          */
-/*  arm64: x0=sock, x1=uaddr, x2=addr_len, x3=peer                     */
+/*                   int peer)                                         */
+/*  arm64: x0=sock, x1=uaddr, x2=peer                                  */
+/*  (the addr_len out-param was dropped in 4.17 — reading x3 as peer   */
+/*  reads garbage and the getpeername gate never arms; 5.15 is 3-arg)  */
 /*                                                                    */
 /*  A bound+connected socket reports its REAL local address here —     */
 /*  TPROXY redirection does not change the socket's own saddr, so an   */
@@ -1966,7 +1968,7 @@ static int getname_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 		return 0;
 	if (!vpnhide_uid_prefix_filtered(uid))
 		return 0;
-	if ((int)regs->regs[3] != 0)
+	if ((int)regs->regs[2] != 0)
 		return 0; /* getpeername: remote address — never local */
 	data->uaddr = (struct sockaddr *)regs->regs[1];
 	return 0;
