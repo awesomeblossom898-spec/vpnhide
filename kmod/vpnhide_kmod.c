@@ -150,6 +150,56 @@ static int nr_prefix4_rules;
 /* Same lock-free gate idiom as prefix_rules_present, for the v4 rewrite path. */
 static bool prefix4_rules_present;
 
+/* real-/64 → fake-/64 map for getsockname(2). A socket's local address
+ * tells us nothing about which iface it left through, and on this design
+ * each iface owns a DIFFERENT v6 fake — so matching the first covering
+ * prefix rule hands out the wrong iface's fake whenever more than one
+ * iface shares the carrier /32 (always). The netlink address path sees
+ * (real addr, rule fake) pairs on every dump and teaches this map; the
+ * getname exit handler then composes with the iface-true fake. v4 shares
+ * one fake across rules by design, so it needs no map. Cleared on every
+ * config apply; until the next dump re-teaches it, getname degrades to
+ * first-rule match (same /32, wrong /64 — cosmetically off, never real). */
+#define V6MAP_MAX 8
+struct v6map_entry {
+	unsigned char real[8];
+	unsigned char fake[8];
+};
+static struct v6map_entry v6map[V6MAP_MAX];
+static int nr_v6map;
+
+/* Callers hold targets_lock. */
+static void v6map_learn(const unsigned char *real16, const unsigned char *fake8)
+{
+	int i;
+
+	for (i = 0; i < nr_v6map; i++) {
+		if (memcmp(v6map[i].real, real16, 8) == 0) {
+			memcpy(v6map[i].fake, fake8, 8);
+			return;
+		}
+	}
+	if (nr_v6map < V6MAP_MAX) {
+		memcpy(v6map[nr_v6map].real, real16, 8);
+		memcpy(v6map[nr_v6map].fake, fake8, 8);
+		nr_v6map++;
+	}
+}
+
+/* Callers hold targets_lock. */
+static bool v6map_lookup(const unsigned char *real16, unsigned char *fake8_out)
+{
+	int i;
+
+	for (i = 0; i < nr_v6map; i++) {
+		if (memcmp(v6map[i].real, real16, 8) == 0) {
+			memcpy(fake8_out, v6map[i].fake, 8);
+			return true;
+		}
+	}
+	return false;
+}
+
 /* The enabled-hook mask for the calling UID (0 if it is not a target). */
 static u32 target_mask(void)
 {
@@ -389,6 +439,9 @@ static ssize_t ctl_write(struct file *file, const char __user *ubuf,
 	memcpy(prefix4_rules, newp4, (size_t)np4 * sizeof(*prefix4_rules));
 	nr_prefix4_rules = np4;
 	WRITE_ONCE(prefix4_rules_present, np4 > 0);
+	/* Rotation lands here: new fakes invalidate every learned real→fake
+	 * /64 mapping; the next netlink dump re-teaches the map. */
+	nr_v6map = 0;
 	{
 		u32 mask = 0;
 		int i;
@@ -937,6 +990,11 @@ static int inet6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 				 * ignored on this path by design (§4.3). */
 				memcpy(data->fake, rule.fake, 8);
 				memcpy(data->fake + 8, ifa->addr.s6_addr + 8, 8);
+				/* Teach the getsockname map which iface's fake this
+				 * real /64 belongs to (per-iface fakes). */
+				spin_lock(&targets_lock);
+				v6map_learn(ifa->addr.s6_addr, rule.fake);
+				spin_unlock(&targets_lock);
 			}
 			vpnhide_dbg("inet6_fill_entry: iface=%s uid=%u -> %s\n",
 				    name, uid,
@@ -2041,7 +2099,13 @@ static void getname_rewrite(struct sockaddr *uaddr)
 		}
 
 		spin_lock(&targets_lock);
-		for (i = 0; i < nr_prefix_rules; i++) {
+		if (v6map_lookup(sin6->sin6_addr.s6_addr, fake)) {
+			/* Iface-true fake learned from the netlink path — the
+			 * socket's local /64 maps to exactly one iface's fake. */
+			memcpy(fake + 8, sin6->sin6_addr.s6_addr + 8, 8);
+			hit = true;
+		}
+		for (i = 0; !hit && i < nr_prefix_rules; i++) {
 			if (prefix_rules[i].mode == VPNHIDE_RULE_REWRITE &&
 			    vpnhide_prefix_match(sin6->sin6_addr.s6_addr,
 						 &prefix_rules[i])) {
