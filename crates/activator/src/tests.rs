@@ -36,9 +36,9 @@ fn projects_native_roles_to_wire() {
         project_native_with_resolver(&cfg, &resolver),
         "vpnhide 1 config\n\
          debug 1\n\
-         target 0x278b 0x20003ff\n\
+         target 0x278b 0x1e0003ff\n\
          target 0x27fa 0x40\n\
-         target 0xf69cb 0x20003ff\n",
+         target 0xf69cb 0x1e0003ff\n",
     );
 }
 
@@ -256,8 +256,8 @@ fn parses_per_hook_java_selection_without_breaking_native() {
         project_native_with_resolver(&cfg, &resolver),
         "vpnhide 1 config\n\
          debug 0\n\
-         target 0x278b 0x20003ff\n\
-         target 0x278c 0x20003ff\n",
+         target 0x278b 0x1e0003ff\n\
+         target 0x278c 0x1e0003ff\n",
     );
 }
 
@@ -645,7 +645,7 @@ fn prefix_rules_come_after_targets_on_the_wire() {
         project_native_with_resolver(&cfg, &resolver),
         "vpnhide 1 config\n\
          debug 0\n\
-         target 0x278b 0x20003ff\n\
+         target 0x278b 0x1e0003ff\n\
          prefix rmnet_data1 24014900000000000000000000000000 0x20\n",
     );
 }
