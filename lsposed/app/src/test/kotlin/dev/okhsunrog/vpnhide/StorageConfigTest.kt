@@ -21,6 +21,9 @@ class StorageConfigTest {
                 "rt6_fill_node",
                 "fib_nl_fill_rule",
                 "if6_seq_show",
+                "inet_getname",
+                "inet6_getname",
+                "rtnl_unicast",
             ),
             NativeKernelHookEntries.map { it.hookName },
         )

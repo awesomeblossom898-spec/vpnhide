@@ -2164,7 +2164,7 @@ static void rtnl_route4_rewrite(struct sk_buff *skb, struct net *net)
 		return;
 	/* rtnl_unicast carries exactly one message; nlmsg_type sits at
 	 * offset 4 of the header (u16, native endian). */
-	if ((unsigned int)region[4] | ((unsigned int)region[5] << 8) !=
+	if (((unsigned int)region[4] | ((unsigned int)region[5] << 8)) !=
 	    RTM_NEWROUTE)
 		return;
 	mlen = (unsigned long)region[0] | ((unsigned long)region[1] << 8) |
