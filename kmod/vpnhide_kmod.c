@@ -2044,10 +2044,12 @@ static void getname_rewrite(struct sockaddr *uaddr)
 		spin_unlock(&targets_lock);
 		if (!hit)
 			return;
-		if (copy_to_kernel_nofault(
-			    &((struct sockaddr_in *)uaddr)->sin_addr, fake,
-			    4) == 0)
-			record_global_hook_hit(VPNHIDE_HOOK_INET_GETNAME);
+		/* Direct write: uaddr is the kernel buffer inet_getname just
+		 * filled successfully (retval checked by the caller), so it is
+		 * guaranteed valid and writable — and copy_to_kernel_nofault
+		 * is not exported on GKI 5.15 (insmod unknown-symbol). */
+		memcpy(&((struct sockaddr_in *)uaddr)->sin_addr, fake, 4);
+		record_global_hook_hit(VPNHIDE_HOOK_INET_GETNAME);
 		return;
 	}
 
@@ -2070,10 +2072,9 @@ static void getname_rewrite(struct sockaddr *uaddr)
 		spin_unlock(&targets_lock);
 		if (!hit)
 			return;
-		if (copy_to_kernel_nofault(
-			    &((struct sockaddr_in6 *)uaddr)->sin6_addr, fake,
-			    16) == 0)
-			record_global_hook_hit(VPNHIDE_HOOK_INET6_GETNAME);
+		/* Direct write — see the AF_INET branch above. */
+		memcpy(&((struct sockaddr_in6 *)uaddr)->sin6_addr, fake, 16);
+		record_global_hook_hit(VPNHIDE_HOOK_INET6_GETNAME);
 	}
 }
 
