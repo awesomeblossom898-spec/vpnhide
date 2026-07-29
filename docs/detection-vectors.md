@@ -216,8 +216,13 @@ covers: `inet6_fill_ifaddr`/`inet_fill_ifaddr` (netlink RTM_GETADDR v6+v4),
 `rt6_fill_node` + `/proc/net/ipv6_route`, where the rewritten dst keeps the
 fake's top 64 bits over the original low 64 so address↔route correlation
 still checks out. v4 rules (`prefix4`) are rewrite-only and cover the
-cellular CGNAT case (fake stays inside 100.64.0.0/10 — an RFC1918 answer on
-a cellular iface would itself be a tell). The substitution is length-preserving
+cellular CGNAT case. The fake may be **any unicast v4 address** — validation
+no longer pins it inside the rule prefix, so a control panel can pin it to
+the proxy exit IP (app-visible local == server-seen exit, rotating with the
+proxy). For hand-entered fakes the CGNAT-range shape is still the editor's
+guidance — an RFC1918 answer on a cellular iface would itself be a tell,
+and a public /32 mimics a no-NAT connection, which is only the right story
+when all traffic really does exit there. The substitution is length-preserving
 by construction (16B/4B binary in netlink, exactly 32 hex chars in procfs), so
 no buffer accounting changes anywhere. On KPM the v6 rewrite **degrades to
 hide** (no `skb->data` offset is verifiable per-KMI for the in-place edit) and
