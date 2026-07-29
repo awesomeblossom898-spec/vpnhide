@@ -5,7 +5,10 @@ package dev.okhsunrog.vpnhide
 // bytes ONCE at config-load time and answers "what fake, if any, should this
 // interface address show" without any parsing on the hot path. Mirrors the
 // kernel matcher semantics (kmod/shared/vpnhide_logic.h): interface name +
-// top-prefixLen-bits equality, same fake bytes for every consumer.
+// top-prefixLen-bits equality, same fake bytes for every consumer. v6 fakes
+// COMPOSE like the kernel's address rewrite: the stored fake's top 64 bits
+// sit over the real address's low 64 (IID-follow), so the visible global
+// address tracks the link-local IID like a stock interface.
 //
 // Parsing NEVER uses InetAddress.getByName — it resolves non-numeric input
 // over the network. The literal parsers below mirror Rust's
@@ -20,13 +23,19 @@ internal class PrefixRewriteRule(
 ) {
     /** The fake to show for [addrBytes] on [ifaceName], or null when this
      * rule doesn't match (different iface, different address family/length,
-     * or outside the rule prefix). */
+     * or outside the rule prefix). A 16-byte (v6) match composes fake top-64
+     * over the address's real low-64; a 4-byte (v4) match substitutes whole. */
     fun fakeFor(
         ifaceName: String,
         addrBytes: ByteArray,
     ): ByteArray? {
         if (iface != ifaceName || addrBytes.size != prefixBytes.size) return null
-        return if (topBitsEqual(prefixBytes, addrBytes, prefixLen)) fakeBytes else null
+        if (!topBitsEqual(prefixBytes, addrBytes, prefixLen)) return null
+        return if (fakeBytes.size == 16) {
+            fakeBytes.copyOfRange(0, 8) + addrBytes.copyOfRange(8, 16)
+        } else {
+            fakeBytes
+        }
     }
 }
 

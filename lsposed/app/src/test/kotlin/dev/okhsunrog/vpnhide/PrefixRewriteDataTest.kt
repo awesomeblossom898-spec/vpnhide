@@ -129,6 +129,28 @@ class PrefixRewriteDataTest {
     }
 
     @Test
+    fun `ipv6 rewrite composes fake prefix with real interface identifier`() {
+        val rule =
+            CanonicalIpv6PrefixRule(
+                "ccmni0",
+                "2401:4900::",
+                32,
+                PrefixRuleMode.Rewrite,
+                "2401:4900:7f3a:9c21:5e88:1b4d:a2f0:6c19",
+            ).toRewriteRuleOrNull()!!
+        // A covered real address: the visible fake keeps the stored fake's top
+        // 64 bits and tracks the real IID (kernel address-rewrite parity).
+        val real = parseIpv6LiteralBytes("2401:4900:5ab1:ed69:7d4e:1b5a:8b51:fe8b")!!
+        assertArrayEquals(
+            parseIpv6LiteralBytes("2401:4900:7f3a:9c21:7d4e:1b5a:8b51:fe8b"),
+            rule.fakeFor("ccmni0", real),
+        )
+        // Outside the rule prefix still misses; wrong iface still misses.
+        assertNull(rule.fakeFor("ccmni0", parseIpv6LiteralBytes("2401:4901::1")!!))
+        assertNull(rule.fakeFor("ccmni1", real))
+    }
+
+    @Test
     fun `list resolver picks first matching rule`() {
         val rules =
             listOf(

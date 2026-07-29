@@ -184,6 +184,20 @@ backend = "kernel"
 kpm = false
 note = "/proc/net/if_inet6 — hide per-iface IPv6 addrs (VPN + prefix rules)"
 
+[[hook]]
+id = 26
+name = "inet_getname"
+backend = "kernel"
+kpm = false
+note = "getsockname(2) — rewrite rule-covered local IPv4 sockaddr to the fake"
+
+[[hook]]
+id = 27
+name = "inet6_getname"
+backend = "kernel"
+kpm = false
+note = "getsockname(2) — rewrite rule-covered local IPv6 sockaddr (fake /64 + real IID)"
+
 # --- backend ids (protocol §4.3 `status backend <id>`) ----------------------
 # Which backend answered a `status` read. Distinct from the hook `backend`
 # field above (.ko and KPM both own "kernel" hooks but are separate backends).

@@ -29,11 +29,13 @@
 #define VPNHIDE_HOOK_ZYGISK_RECVFROM               23
 #define VPNHIDE_HOOK_ZYGISK_RECVFROM_CHK           24
 #define VPNHIDE_HOOK_IF6_SEQ_SHOW                  25
-#define VPNHIDE_HOOK_COUNT                         26
+#define VPNHIDE_HOOK_INET_GETNAME                  26
+#define VPNHIDE_HOOK_INET6_GETNAME                 27
+#define VPNHIDE_HOOK_COUNT                         28
 
 /* Hooks owned by each backend: apply `mask & own`, ignore foreign bits.
    KPM is the subset of the kernel hooks the KPM backend installs. */
-#define VPNHIDE_KERNEL_HOOK_MASK 0x20003ffu
+#define VPNHIDE_KERNEL_HOOK_MASK 0xe0003ffu
 #define VPNHIDE_KPM_HOOK_MASK 0x3ffu
 #define VPNHIDE_ZYGISK_HOOK_MASK 0x1fc0000u
 #define VPNHIDE_LSPOSED_HOOK_MASK 0x3fc00u
@@ -82,6 +84,8 @@ static inline const char *vpnhide_hook_name(int id)
 	case 23: return "zygisk_recvfrom";
 	case 24: return "zygisk_recvfrom_chk";
 	case 25: return "if6_seq_show";
+	case 26: return "inet_getname";
+	case 27: return "inet6_getname";
 	default: return "?";
 	}
 }

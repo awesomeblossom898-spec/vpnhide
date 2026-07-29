@@ -60,6 +60,8 @@ internal enum class DetectionMethod(
                 HookIds.Hook.INET_FILL_IFADDR,
                 HookIds.Hook.INET6_FILL_IFADDR,
                 HookIds.Hook.IF6_SEQ_SHOW,
+                HookIds.Hook.INET_GETNAME,
+                HookIds.Hook.INET6_GETNAME,
                 -> Interfaces
 
                 HookIds.Hook.DEV_IOCTL,

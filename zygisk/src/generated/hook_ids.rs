@@ -58,13 +58,17 @@ pub enum Hook {
     ZygiskRecvfromChk = 24,
     /// /proc/net/if_inet6 — hide per-iface IPv6 addrs (VPN + prefix rules)
     If6SeqShow = 25,
+    /// getsockname(2) — rewrite rule-covered local IPv4 sockaddr to the fake
+    InetGetname = 26,
+    /// getsockname(2) — rewrite rule-covered local IPv6 sockaddr (fake /64 + real IID)
+    Inet6Getname = 27,
 }
 
-pub const HOOK_COUNT: u32 = 26;
+pub const HOOK_COUNT: u32 = 28;
 
 /// Hooks owned by each backend: apply `mask & own`.
 /// KPM is the subset of the kernel hooks the KPM backend installs.
-pub const KERNEL_HOOK_MASK: u32 = 0x20003ff;
+pub const KERNEL_HOOK_MASK: u32 = 0xe0003ff;
 pub const KPM_HOOK_MASK: u32 = 0x3ff;
 pub const ZYGISK_HOOK_MASK: u32 = 0x1fc0000;
 pub const LSPOSED_HOOK_MASK: u32 = 0x3fc00;
@@ -99,7 +103,7 @@ pub enum Backend {
     Lsposed = 3,
 }
 
-pub const HOOK_NAMES: [&str; 26] = [
+pub const HOOK_NAMES: [&str; 28] = [
     "fib_route_seq_show",
     "ipv6_route_seq_show",
     "rtnl_fill_ifinfo",
@@ -126,4 +130,6 @@ pub const HOOK_NAMES: [&str; 26] = [
     "zygisk_recvfrom",
     "zygisk_recvfrom_chk",
     "if6_seq_show",
+    "inet_getname",
+    "inet6_getname",
 ];

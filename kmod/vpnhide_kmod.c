@@ -16,9 +16,12 @@
  *   - fib_route_seq_show: filters /proc/net/route entries
  *   - ipv6_route_seq_show: filters /proc/net/ipv6_route entries
  *   - if6_seq_show: filters /proc/net/if_inet6 entries
- *   - fib_dump_info: filters IPv4 RTM_GETROUTE dump replies
+ *   - fib_dump_info: filters IPv4 RTM_GETROUTE dump replies, rewrites
+ *     rule-covered v4 route addresses (gateway/dst/prefsrc)
  *   - rt6_fill_node: filters IPv6 RTM_GETROUTE replies
  *   - fib_nl_fill_rule: filters policy routing rules for target UIDs
+ *   - inet_getname/inet6_getname: rewrite getsockname() local addresses
+ *     covered by prefix4/prefix rules (fake, v6 with IID-follow compose)
  *
  * Control plane: a single folded node /proc/vpnhide_ctl carries the shared
  * control/stats protocol (docs/protocol.md). A write is a `vpnhide 1 config`
@@ -41,6 +44,8 @@
 #include <linux/uidgid.h>
 #include <linux/string.h>
 #include <linux/net.h>
+#include <linux/in.h>
+#include <linux/in6.h>
 #include <linux/if.h>
 #include <linux/uaccess.h>
 #include <linux/seq_file.h>
@@ -901,7 +906,15 @@ static int inet6_fill_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 			data->action = vpn_hit ? VPNHIDE_RULE_HIDE : rule.mode;
 			if (!vpn_hit && rule.mode == VPNHIDE_RULE_REWRITE) {
 				memcpy(data->real, ifa->addr.s6_addr, 16);
-				memcpy(data->fake, rule.fake, 16);
+				/* IID-follow compose: the visible address keeps the
+				 * fake's top 64 bits but tracks the real low 64 (the
+				 * interface identifier) — the same compose rt6 route
+				 * destinations already use, so the visible global
+				 * address shares one IID with the visible fe80 like a
+				 * stock interface. The stored fake's low 64 bits are
+				 * ignored on this path by design (§4.3). */
+				memcpy(data->fake, rule.fake, 8);
+				memcpy(data->fake + 8, ifa->addr.s6_addr + 8, 8);
 			}
 			vpnhide_dbg("inet6_fill_entry: iface=%s uid=%u -> %s\n",
 				    name, uid,
@@ -1310,9 +1323,12 @@ static int if6_seq_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 			    vpnhide_iface_is_vpn :
 			    (vpnhide_match_fn)0;
 
+	/* route_compose=1: if_inet6 address lines rewrite with the same
+	 * IID-follow compose as route destinations — fake top 64 over the real
+	 * low 64, so the visible global IID matches the (untouched) fe80 IID. */
 	newc = vpnhide_compact_if_inet6_lines(seq->buf, data->start_count,
 					      seq->count, vpn_match, snap, np,
-					      0);
+					      1);
 	if (newc != seq->count) {
 		seq->count = newc;
 		if (vpn_match)
@@ -1482,14 +1498,85 @@ static struct net_device *dev_from_fib6_info(struct fib6_info *rt)
 	return dev;
 }
 
+/* The first real nexthop of `nh` (resolving a multipath group), mirroring
+ * dev_from_nexthop's walk — every read fault-safe. */
+static struct nexthop *first_real_nexthop(struct nexthop *nh)
+{
+	bool is_group = false;
+
+	if (!nh)
+		return NULL;
+	if (copy_from_kernel_nofault(&is_group, &nh->is_group,
+				     sizeof(is_group)) != 0)
+		return NULL;
+	if (is_group) {
+		struct nh_group *nh_grp = NULL;
+		struct nexthop *first_nh = NULL;
+		u16 num_nh = 0;
+
+		if (copy_from_kernel_nofault(&nh_grp, &nh->nh_grp,
+					     sizeof(nh_grp)) != 0 ||
+		    !nh_grp)
+			return NULL;
+		if (copy_from_kernel_nofault(&num_nh, &nh_grp->num_nh,
+					     sizeof(num_nh)) != 0 ||
+		    num_nh == 0)
+			return NULL;
+		if (copy_from_kernel_nofault(&first_nh,
+					     &nh_grp->nh_entries[0].nh,
+					     sizeof(first_nh)) != 0 ||
+		    !first_nh)
+			return NULL;
+		nh = first_nh;
+	}
+	return nh;
+}
+
+/* The route's gateway (__be32, network order), mirroring dev_from_fib_info's
+ * modern-then-legacy nexthop walk. False when there is no gateway (scope-link
+ * host routes carry none) or any read faults. */
+static bool gw_from_fib_info(struct fib_info *fi, __be32 *gw)
+{
+	struct nexthop *nh = NULL;
+	int fib_nhs = 0;
+
+	if (!fi || !gw)
+		return false;
+	*gw = 0;
+	if (copy_from_kernel_nofault(&nh, &fi->nh, sizeof(nh)) == 0 && nh) {
+		struct nh_info *nhi = NULL;
+
+		nh = first_real_nexthop(nh);
+		if (!nh)
+			return false;
+		if (copy_from_kernel_nofault(&nhi, &nh->nh_info,
+					     sizeof(nhi)) != 0 ||
+		    !nhi)
+			return false;
+		if (copy_from_kernel_nofault(gw, &nhi->fib_nhc.nhc_gw.ipv4,
+					     sizeof(*gw)) != 0)
+			return false;
+		return *gw != 0;
+	}
+	if (copy_from_kernel_nofault(&fib_nhs, &fi->fib_nhs,
+				     sizeof(fib_nhs)) != 0 ||
+	    fib_nhs <= 0)
+		return false;
+	if (copy_from_kernel_nofault(gw, &fi->fib_nh[0].nh_common.nhc_gw.ipv4,
+				     sizeof(*gw)) != 0)
+		return false;
+	return *gw != 0;
+}
+
 struct route_skb_data {
 	struct sk_buff *skb;
 	unsigned int saved_len;
 	bool should_filter;
 	bool uid_target; /* filtering UID is a target (per-uid) vs global-only */
 	u8 action; /* VPNHIDE_RULE_* — hide trims, rewrite overwrites */
-	unsigned char real[16]; /* route dst the fill wrote (compare needle) */
-	unsigned char fake[16]; /* composed rewrite dst (fake /64 + orig low) */
+	bool v4_addrs; /* rewrite walks 4-byte DST/GATEWAY/PREFSRC, not v6 DST */
+	unsigned char real[16]; /* route addr the fill wrote (compare needle) */
+	unsigned char fake[16]; /* rewrite value (v4 fake / composed v6 dst) */
 };
 
 static void init_route_skb_data(struct route_skb_data *data)
@@ -1499,6 +1586,7 @@ static void init_route_skb_data(struct route_skb_data *data)
 	data->should_filter = false;
 	data->uid_target = true;
 	data->action = VPNHIDE_RULE_HIDE;
+	data->v4_addrs = false;
 }
 
 static int route_skb_ret(struct route_skb_data *data, struct pt_regs *regs,
@@ -1507,10 +1595,15 @@ static int route_skb_ret(struct route_skb_data *data, struct pt_regs *regs,
 	if (!data->should_filter || !data->skb)
 		return 0;
 
-	/* Rewrite (rt6 prefix rules only): the route's RTA_DST in
-	 * [saved_len, skb->len) is overwritten with the composed destination
-	 * (fake's top 64 bits, original low 64). Same byte length, zero
-	 * fixups. Nested RTA_MULTIPATH nexthop RTA_DSTs are not walked —
+	/* Rewrite: attrs in [saved_len, skb->len) are overwritten in place —
+	 * same byte length, zero fixups. The v6 shape (rt6 prefix rules)
+	 * rewrites RTA_DST with the composed destination (fake's top 64 bits,
+	 * original low 64). The v4 shape (prefix4 rules) rewrites every
+	 * occurrence of the real address in RTA_DST / RTA_GATEWAY /
+	 * RTA_PREFSRC — on cellular all three carry the interface's own
+	 * address (the gateway echoes it), so one compare-needle covers the
+	 * default route, the scope-link host route, and the local-table
+	 * route alike. Nested RTA_MULTIPATH nexthops are not walked —
 	 * cellular routes are single-path; documented residual vector. */
 	if (data->action == VPNHIDE_RULE_REWRITE &&
 	    regs_return_value(regs) >= 0) {
@@ -1518,8 +1611,17 @@ static int route_skb_ret(struct route_skb_data *data, struct pt_regs *regs,
 		unsigned long rlen = data->skb->len - data->saved_len;
 		unsigned long hdr = NLMSG_HDRLEN + sizeof(struct rtmsg);
 
-		vpnhide_rtattr_replace(region, rlen, hdr, RTA_DST, data->real,
-				       data->fake, 16);
+		if (data->v4_addrs) {
+			vpnhide_rtattr_replace(region, rlen, hdr, RTA_DST,
+					       data->real, data->fake, 4);
+			vpnhide_rtattr_replace(region, rlen, hdr, RTA_GATEWAY,
+					       data->real, data->fake, 4);
+			vpnhide_rtattr_replace(region, rlen, hdr, RTA_PREFSRC,
+					       data->real, data->fake, 4);
+		} else {
+			vpnhide_rtattr_replace(region, rlen, hdr, RTA_DST,
+					       data->real, data->fake, 16);
+		}
 		if (data->uid_target)
 			record_hook_hit(hook_id);
 		else
@@ -1553,12 +1655,20 @@ static int fib_dump_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	struct fib_rt_info fri_copy;
 	struct net_device *dev = NULL;
 	char dev_name[IFNAMSIZ];
+	uid_t uid = from_kuid(&init_user_ns, current_uid());
+	bool active = hook_active(VPNHIDE_HOOK_FIB_DUMP_INFO);
+	/* The v4 route-address rewrite rides the same global reader-uid gate
+	 * as the address rewrite (app/shell see fakes, system sees truth) and
+	 * must not depend on any per-uid target — with apps {} there are
+	 * none, yet the gateway/dst leak still needs covering. */
+	bool v4_on = READ_ONCE(prefix4_rules_present) &&
+		     vpnhide_uid_prefix_filtered(uid);
 	bool vpn_route;
 	bool host_hint;
 
 	init_route_skb_data(data);
 
-	if (!hook_active(VPNHIDE_HOOK_FIB_DUMP_INFO) || !fri)
+	if ((!active && !v4_on) || !fri)
 		return 0;
 	if (copy_from_kernel_nofault(&fri_copy, fri, sizeof(fri_copy)) != 0)
 		return 0;
@@ -1569,8 +1679,9 @@ static int fib_dump_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 		rcu_read_unlock();
 		return 0;
 	}
-	vpn_route = is_vpn_ifname(dev_name);
-	host_hint = is_public_host_route_via_physical(&fri_copy, dev);
+	vpn_route = active && is_vpn_ifname(dev_name);
+	host_hint = active && !vpn_route &&
+		    is_public_host_route_via_physical(&fri_copy, dev);
 	if (vpn_route || host_hint) {
 		data->skb = (struct sk_buff *)regs->regs[0];
 		data->saved_len = data->skb ? data->skb->len : 0;
@@ -1578,6 +1689,41 @@ static int fib_dump_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 		vpnhide_dbg("fib_dump_entry: hiding %s via %s\n",
 			    vpn_route ? "VPN route" : "public host route",
 			    dev_name);
+	} else if (v4_on) {
+		__be32 gw = 0;
+		struct vpnhide_prefix4_rule r4;
+		const unsigned char *needle = NULL;
+
+		/* The gateway echoes the interface's own real address on
+		 * cellular (point-to-point /32 semantics), so the default
+		 * route's RTA_GATEWAY leaks exactly what the address rewrite
+		 * covers. The scope-link /32 host route and the local-table
+		 * route carry it in RTA_DST instead. First covered value
+		 * wins; the ret handler rewrites its every 4-byte occurrence
+		 * in DST/GATEWAY/PREFSRC. */
+		if (gw_from_fib_info(fri_copy.fi, &gw) &&
+		    prefix4_rule_find(dev_name, (const unsigned char *)&gw,
+				      &r4)) {
+			needle = (const unsigned char *)&gw;
+		} else if (fri_copy.dst_len == 32 &&
+			   prefix4_rule_find(dev_name,
+					     (const unsigned char *)&fri_copy.dst,
+					     &r4)) {
+			needle = (const unsigned char *)&fri_copy.dst;
+		}
+		if (needle) {
+			data->skb = (struct sk_buff *)regs->regs[0];
+			data->saved_len = data->skb ? data->skb->len : 0;
+			data->should_filter = true;
+			data->uid_target = false; /* global rule, not a target hit */
+			data->action = VPNHIDE_RULE_REWRITE;
+			data->v4_addrs = true;
+			memcpy(data->real, needle, 4);
+			memcpy(data->fake, r4.fake, 4);
+			vpnhide_dbg(
+				"fib_dump_entry: rewriting v4 route addrs on %s\n",
+				dev_name);
+		}
 	}
 	rcu_read_unlock();
 
@@ -1802,6 +1948,139 @@ static struct kretprobe fib_rule_fill_krp = {
 };
 
 /* ================================================================== */
+/*  Hooks 12/13: inet_getname / inet6_getname — getsockname(2)         */
+/*                                                                    */
+/*  int inet_getname(struct socket *sock, struct sockaddr *uaddr,      */
+/*                   int *addr_len, int peer)                          */
+/*  arm64: x0=sock, x1=uaddr, x2=addr_len, x3=peer                     */
+/*                                                                    */
+/*  A bound+connected socket reports its REAL local address here —     */
+/*  TPROXY redirection does not change the socket's own saddr, so an   */
+/*  app can read the covered address straight off its own socket. The  */
+/*  uaddr buffer is kernel-space (the syscall copies it to userspace   */
+/*  after this function returns), so a successful exit handler can     */
+/*  rewrite it in place. Gated exactly like the prefix rewrites        */
+/*  (app/shell readers only — a root/system proxy client keeps the     */
+/*  truth). Rules resolve iface-agnostically: a socket carries no      */
+/*  reliable ifname, so the first rule whose prefix covers the local   */
+/*  address wins — correct whenever covered ifaces share one fake      */
+/*  (the recommended posture). The v6 rewrite composes fake top-64 +   */
+/*  real IID, matching the address rewrite. getpeername (peer != 0)    */
+/*  returns the REMOTE address and is never touched.                   */
+/* ================================================================== */
+
+struct getname_data {
+	struct sockaddr *uaddr;
+};
+
+static int getname_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct getname_data *data = (void *)ri->data;
+	uid_t uid = from_kuid(&init_user_ns, current_uid());
+
+	data->uaddr = NULL;
+	if (!READ_ONCE(prefix_rules_present) &&
+	    !READ_ONCE(prefix4_rules_present))
+		return 0;
+	if (!vpnhide_uid_prefix_filtered(uid))
+		return 0;
+	if ((int)regs->regs[3] != 0)
+		return 0; /* getpeername: remote address — never local */
+	data->uaddr = (struct sockaddr *)regs->regs[1];
+	return 0;
+}
+
+/* Shared by both getname krps: the sockaddr family says which one fired
+ * (inet_getname only ever fills AF_INET, inet6_getname AF_INET6), so one
+ * handler serves both and stats land on the right hook id. */
+static void getname_rewrite(struct sockaddr *uaddr)
+{
+	struct sockaddr_storage ss;
+	unsigned char fake[16];
+	bool hit = false;
+	int i;
+
+	if (copy_from_kernel_nofault(&ss, uaddr, sizeof(ss)) != 0)
+		return;
+
+	if (ss.ss_family == AF_INET) {
+		struct sockaddr_in *sin = (struct sockaddr_in *)&ss;
+
+		spin_lock(&targets_lock);
+		for (i = 0; i < nr_prefix4_rules; i++) {
+			if (vpnhide_prefix4_match(
+				    (const unsigned char *)&sin->sin_addr,
+				    &prefix4_rules[i])) {
+				memcpy(fake, prefix4_rules[i].fake, 4);
+				hit = true;
+				break;
+			}
+		}
+		spin_unlock(&targets_lock);
+		if (!hit)
+			return;
+		if (copy_to_kernel_nofault(
+			    &((struct sockaddr_in *)uaddr)->sin_addr, fake,
+			    4) == 0)
+			record_global_hook_hit(VPNHIDE_HOOK_INET_GETNAME);
+		return;
+	}
+
+	if (ss.ss_family == AF_INET6) {
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&ss;
+
+		spin_lock(&targets_lock);
+		for (i = 0; i < nr_prefix_rules; i++) {
+			if (prefix_rules[i].mode == VPNHIDE_RULE_REWRITE &&
+			    vpnhide_prefix_match(sin6->sin6_addr.s6_addr,
+						 &prefix_rules[i])) {
+				/* IID-follow compose, same as the address
+				 * rewrite: fake top 64, real low 64. */
+				memcpy(fake, prefix_rules[i].fake, 8);
+				memcpy(fake + 8, sin6->sin6_addr.s6_addr + 8, 8);
+				hit = true;
+				break;
+			}
+		}
+		spin_unlock(&targets_lock);
+		if (!hit)
+			return;
+		if (copy_to_kernel_nofault(
+			    &((struct sockaddr_in6 *)uaddr)->sin6_addr, fake,
+			    16) == 0)
+			record_global_hook_hit(VPNHIDE_HOOK_INET6_GETNAME);
+	}
+}
+
+static int getname_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+	struct getname_data *data = (void *)ri->data;
+
+	if (!data->uaddr)
+		return 0;
+	if ((long)regs_return_value(regs) != 0)
+		return 0;
+	getname_rewrite(data->uaddr);
+	return 0;
+}
+
+static struct kretprobe getname_krp = {
+	.handler = getname_ret,
+	.entry_handler = getname_entry,
+	.data_size = sizeof(struct getname_data),
+	.maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
+	.kp.symbol_name = "inet_getname",
+};
+
+static struct kretprobe getname6_krp = {
+	.handler = getname_ret,
+	.entry_handler = getname_entry,
+	.data_size = sizeof(struct getname_data),
+	.maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
+	.kp.symbol_name = "inet6_getname",
+};
+
+/* ================================================================== */
 /*  Module init / exit                                                */
 /* ================================================================== */
 
@@ -1832,6 +2111,8 @@ static struct kretprobe_reg probes[] = {
 	{ &rt6_fill_krp, "rt6_fill_node", VPNHIDE_HOOK_RT6_FILL_NODE, false },
 	{ &fib_rule_fill_krp, "fib_nl_fill_rule", VPNHIDE_HOOK_FIB_NL_FILL_RULE,
 	  false },
+	{ &getname_krp, "inet_getname", VPNHIDE_HOOK_INET_GETNAME, false },
+	{ &getname6_krp, "inet6_getname", VPNHIDE_HOOK_INET6_GETNAME, false },
 };
 
 /* Bitset of hooks that actually registered — the `status` hooks mask (§4.3). */
