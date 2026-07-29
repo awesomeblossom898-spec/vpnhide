@@ -229,6 +229,27 @@ static bool prefix4_rule_find(const char *ifname, const unsigned char addr[4],
 	return hit;
 }
 
+/* True when any prefix4 rule covers this ifname at all — a cheap entry-time
+ * pre-filter so route handlers only arm for ifaces the config cares about
+ * (the per-address match still happens per attr on the exit path). */
+static bool prefix4_iface_covered(const char *ifname)
+{
+	bool hit = false;
+	int i;
+
+	if (!READ_ONCE(prefix4_rules_present) || !ifname)
+		return false;
+	spin_lock(&targets_lock);
+	for (i = 0; i < nr_prefix4_rules; i++) {
+		if (vpnhide_streq(ifname, prefix4_rules[i].ifname)) {
+			hit = true;
+			break;
+		}
+	}
+	spin_unlock(&targets_lock);
+	return hit;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Native interception stats (protocol §4.3 `stats`)                 */
 /* ------------------------------------------------------------------ */
@@ -1523,76 +1544,6 @@ static struct net_device *dev_from_fib6_info(struct fib6_info *rt)
 	return dev;
 }
 
-/* The first real nexthop of `nh` (resolving a multipath group), mirroring
- * dev_from_nexthop's walk — every read fault-safe. */
-static struct nexthop *first_real_nexthop(struct nexthop *nh)
-{
-	bool is_group = false;
-
-	if (!nh)
-		return NULL;
-	if (copy_from_kernel_nofault(&is_group, &nh->is_group,
-				     sizeof(is_group)) != 0)
-		return NULL;
-	if (is_group) {
-		struct nh_group *nh_grp = NULL;
-		struct nexthop *first_nh = NULL;
-		u16 num_nh = 0;
-
-		if (copy_from_kernel_nofault(&nh_grp, &nh->nh_grp,
-					     sizeof(nh_grp)) != 0 ||
-		    !nh_grp)
-			return NULL;
-		if (copy_from_kernel_nofault(&num_nh, &nh_grp->num_nh,
-					     sizeof(num_nh)) != 0 ||
-		    num_nh == 0)
-			return NULL;
-		if (copy_from_kernel_nofault(&first_nh,
-					     &nh_grp->nh_entries[0].nh,
-					     sizeof(first_nh)) != 0 ||
-		    !first_nh)
-			return NULL;
-		nh = first_nh;
-	}
-	return nh;
-}
-
-/* The route's gateway (__be32, network order), mirroring dev_from_fib_info's
- * modern-then-legacy nexthop walk. False when there is no gateway (scope-link
- * host routes carry none) or any read faults. */
-static bool gw_from_fib_info(struct fib_info *fi, __be32 *gw)
-{
-	struct nexthop *nh = NULL;
-	int fib_nhs = 0;
-
-	if (!fi || !gw)
-		return false;
-	*gw = 0;
-	if (copy_from_kernel_nofault(&nh, &fi->nh, sizeof(nh)) == 0 && nh) {
-		struct nh_info *nhi = NULL;
-
-		nh = first_real_nexthop(nh);
-		if (!nh)
-			return false;
-		if (copy_from_kernel_nofault(&nhi, &nh->nh_info,
-					     sizeof(nhi)) != 0 ||
-		    !nhi)
-			return false;
-		if (copy_from_kernel_nofault(gw, &nhi->fib_nhc.nhc_gw.ipv4,
-					     sizeof(*gw)) != 0)
-			return false;
-		return *gw != 0;
-	}
-	if (copy_from_kernel_nofault(&fib_nhs, &fi->fib_nhs,
-				     sizeof(fib_nhs)) != 0 ||
-	    fib_nhs <= 0)
-		return false;
-	if (copy_from_kernel_nofault(gw, &fi->fib_nh[0].nh_common.nhc_gw.ipv4,
-				     sizeof(*gw)) != 0)
-		return false;
-	return *gw != 0;
-}
-
 struct route_skb_data {
 	struct sk_buff *skb;
 	unsigned int saved_len;
@@ -1600,6 +1551,7 @@ struct route_skb_data {
 	bool uid_target; /* filtering UID is a target (per-uid) vs global-only */
 	u8 action; /* VPNHIDE_RULE_* — hide trims, rewrite overwrites */
 	bool v4_addrs; /* rewrite walks 4-byte DST/GATEWAY/PREFSRC, not v6 DST */
+	char ifname[IFNAMSIZ]; /* v4_addrs: the route's egress iface (rule key) */
 	unsigned char real[16]; /* route addr the fill wrote (compare needle) */
 	unsigned char fake[16]; /* rewrite value (v4 fake / composed v6 dst) */
 };
@@ -1612,6 +1564,7 @@ static void init_route_skb_data(struct route_skb_data *data)
 	data->uid_target = true;
 	data->action = VPNHIDE_RULE_HIDE;
 	data->v4_addrs = false;
+	data->ifname[0] = '\0';
 }
 
 static int route_skb_ret(struct route_skb_data *data, struct pt_regs *regs,
@@ -1624,12 +1577,12 @@ static int route_skb_ret(struct route_skb_data *data, struct pt_regs *regs,
 	 * same byte length, zero fixups. The v6 shape (rt6 prefix rules)
 	 * rewrites RTA_DST with the composed destination (fake's top 64 bits,
 	 * original low 64). The v4 shape (prefix4 rules) rewrites every
-	 * occurrence of the real address in RTA_DST / RTA_GATEWAY /
-	 * RTA_PREFSRC — on cellular all three carry the interface's own
-	 * address (the gateway echoes it), so one compare-needle covers the
-	 * default route, the scope-link host route, and the local-table
-	 * route alike. Nested RTA_MULTIPATH nexthops are not walked —
-	 * cellular routes are single-path; documented residual vector. */
+	 * 4-byte DST/GATEWAY/PREFSRC payload a rule on the egress iface
+	 * covers — each attr is its own needle, so the default route's
+	 * gateway echo, the /32 host route's dst, AND the connected subnet
+	 * route's prefsrc all fake in one pass. Nested RTA_MULTIPATH
+	 * nexthops are not walked — cellular routes are single-path;
+	 * documented residual vector. */
 	if (data->action == VPNHIDE_RULE_REWRITE &&
 	    regs_return_value(regs) >= 0) {
 		unsigned char *region = data->skb->data + data->saved_len;
@@ -1637,16 +1590,41 @@ static int route_skb_ret(struct route_skb_data *data, struct pt_regs *regs,
 		unsigned long hdr = NLMSG_HDRLEN + sizeof(struct rtmsg);
 
 		if (data->v4_addrs) {
-			vpnhide_rtattr_replace(region, rlen, hdr, RTA_DST,
-					       data->real, data->fake, 4);
-			vpnhide_rtattr_replace(region, rlen, hdr, RTA_GATEWAY,
-					       data->real, data->fake, 4);
-			vpnhide_rtattr_replace(region, rlen, hdr, RTA_PREFSRC,
-					       data->real, data->fake, 4);
-		} else {
-			vpnhide_rtattr_replace(region, rlen, hdr, RTA_DST,
-					       data->real, data->fake, 16);
+			unsigned long off = hdr;
+			int hits = 0;
+
+			while (off + 4 <= rlen) {
+				unsigned int alen = (unsigned int)region[off] |
+						    ((unsigned int)region[off + 1]
+						     << 8);
+				unsigned int atype = (unsigned int)region[off + 2] |
+						     ((unsigned int)region[off + 3]
+						      << 8);
+				unsigned long aligned;
+				struct vpnhide_prefix4_rule r4;
+
+				if (alen < 4 || off + alen > rlen)
+					break;
+				if ((atype == RTA_DST || atype == RTA_GATEWAY ||
+				     atype == RTA_PREFSRC) &&
+				    alen - 4 == 4 &&
+				    prefix4_rule_find(data->ifname,
+						      region + off + 4, &r4)) {
+					memcpy(region + off + 4, r4.fake, 4);
+					hits++;
+				}
+				aligned = ((unsigned long)alen + 3UL) & ~3UL;
+				if (aligned == 0 || off + aligned <= off)
+					break;
+				off += aligned;
+			}
+			if (hits > 0)
+				record_global_hook_hit(hook_id);
+			return 0;
 		}
+
+		vpnhide_rtattr_replace(region, rlen, hdr, RTA_DST, data->real,
+				       data->fake, 16);
 		if (data->uid_target)
 			record_hook_hit(hook_id);
 		else
@@ -1714,41 +1692,20 @@ static int fib_dump_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 		vpnhide_dbg("fib_dump_entry: hiding %s via %s\n",
 			    vpn_route ? "VPN route" : "public host route",
 			    dev_name);
-	} else if (v4_on) {
-		__be32 gw = 0;
-		struct vpnhide_prefix4_rule r4;
-		const unsigned char *needle = NULL;
-
-		/* The gateway echoes the interface's own real address on
-		 * cellular (point-to-point /32 semantics), so the default
-		 * route's RTA_GATEWAY leaks exactly what the address rewrite
-		 * covers. The scope-link /32 host route and the local-table
-		 * route carry it in RTA_DST instead. First covered value
-		 * wins; the ret handler rewrites its every 4-byte occurrence
-		 * in DST/GATEWAY/PREFSRC. */
-		if (gw_from_fib_info(fri_copy.fi, &gw) &&
-		    prefix4_rule_find(dev_name, (const unsigned char *)&gw,
-				      &r4)) {
-			needle = (const unsigned char *)&gw;
-		} else if (fri_copy.dst_len == 32 &&
-			   prefix4_rule_find(dev_name,
-					     (const unsigned char *)&fri_copy.dst,
-					     &r4)) {
-			needle = (const unsigned char *)&fri_copy.dst;
-		}
-		if (needle) {
-			data->skb = (struct sk_buff *)regs->regs[0];
-			data->saved_len = data->skb ? data->skb->len : 0;
-			data->should_filter = true;
-			data->uid_target = false; /* global rule, not a target hit */
-			data->action = VPNHIDE_RULE_REWRITE;
-			data->v4_addrs = true;
-			memcpy(data->real, needle, 4);
-			memcpy(data->fake, r4.fake, 4);
-			vpnhide_dbg(
-				"fib_dump_entry: rewriting v4 route addrs on %s\n",
-				dev_name);
-		}
+	} else if (v4_on && prefix4_iface_covered(dev_name)) {
+		/* The route's 4-byte DST/GATEWAY/PREFSRC payloads leak the
+		 * interface's own address on cellular (gateway echo, /32 host
+		 * route, connected-route prefsrc). Arm the exit walk; each
+		 * attr re-matches against the rules on the way out. */
+		data->skb = (struct sk_buff *)regs->regs[0];
+		data->saved_len = data->skb ? data->skb->len : 0;
+		data->should_filter = true;
+		data->uid_target = false; /* global rule, not a target hit */
+		data->action = VPNHIDE_RULE_REWRITE;
+		data->v4_addrs = true;
+		memcpy(data->ifname, dev_name, IFNAMSIZ);
+		vpnhide_dbg("fib_dump_entry: rewriting v4 route addrs on %s\n",
+			    dev_name);
 	}
 	rcu_read_unlock();
 
