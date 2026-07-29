@@ -2015,6 +2015,31 @@ static void getname_rewrite(struct sockaddr *uaddr)
 	if (ss.ss_family == AF_INET6) {
 		struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *)&ss;
 
+		/* Android sockets are PF_INET6 with IPV6_V6ONLY off: a plain
+		 * v4 connection comes back as v4-MAPPED (::ffff:a.b.c.d), and
+		 * inet_getname never fires for it. Rewrite the mapped tail
+		 * with the v4 rules — same fake an AF_INET socket would get. */
+		if (ipv6_addr_v4mapped(&sin6->sin6_addr)) {
+			spin_lock(&targets_lock);
+			for (i = 0; i < nr_prefix4_rules; i++) {
+				if (vpnhide_prefix4_match(
+					    sin6->sin6_addr.s6_addr + 12,
+					    &prefix4_rules[i])) {
+					memcpy(fake, prefix4_rules[i].fake, 4);
+					hit = true;
+					break;
+				}
+			}
+			spin_unlock(&targets_lock);
+			if (!hit)
+				return;
+			/* Direct write — see the AF_INET branch above. */
+			memcpy(((struct sockaddr_in6 *)uaddr)->sin6_addr.s6_addr + 12,
+			       fake, 4);
+			record_global_hook_hit(VPNHIDE_HOOK_INET6_GETNAME);
+			return;
+		}
+
 		spin_lock(&targets_lock);
 		for (i = 0; i < nr_prefix_rules; i++) {
 			if (prefix_rules[i].mode == VPNHIDE_RULE_REWRITE &&
