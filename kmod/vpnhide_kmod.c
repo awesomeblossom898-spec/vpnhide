@@ -62,6 +62,7 @@
 #include <net/ip6_route.h>
 #include <net/route.h>
 #include <net/fib_rules.h>
+#include <net/net_namespace.h>
 
 #include "generated/iface_lists.h"
 #include "generated/hook_ids.h"
@@ -1122,9 +1123,12 @@ static int fib_route_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
 	 * arm64: x0 = seq_file*, x1 = v (iterator element).
 	 * Save seq pointer and current buffer position so the
 	 * return handler knows where this call's output begins.
+	 * The prefix4 presence flag keeps the gateway/destination column
+	 * rewrite alive even with no per-uid targets configured.
 	 */
 	data->seq = (struct seq_file *)regs->regs[0];
-	data->target = hook_active(VPNHIDE_HOOK_FIB_ROUTE_SEQ_SHOW);
+	data->target = hook_active(VPNHIDE_HOOK_FIB_ROUTE_SEQ_SHOW) ||
+		       READ_ONCE(prefix4_rules_present);
 
 	if (data->target && data->seq) {
 		data->start_count = data->seq->count;
@@ -1166,6 +1170,27 @@ static int fib_route_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
 	if (newc != seq->count) {
 		seq->count = newc;
 		record_hook_hit(VPNHIDE_HOOK_FIB_ROUTE_SEQ_SHOW);
+	}
+
+	/* v4 route-address rewrite for app/shell readers: the Gateway column
+	 * of the default route (and the Destination of the host route) echoes
+	 * the covered interface address on cellular. Fixed-width uppercase
+	 * LE-hex columns, rewritten in place after compaction — the netlink
+	 * fib_dump_info hook rewrites the same routes, so the two read paths
+	 * stay identical. */
+	if (vpnhide_uid_prefix_filtered(
+		    from_kuid(&init_user_ns, current_uid()))) {
+		struct vpnhide_prefix4_rule snap4[MAX_PREFIX4_RULES];
+		int n4, rw;
+
+		spin_lock(&targets_lock);
+		n4 = nr_prefix4_rules;
+		memcpy(snap4, prefix4_rules, (size_t)n4 * sizeof(*snap4));
+		spin_unlock(&targets_lock);
+		rw = vpnhide_rewrite_route4_lines(seq->buf, data->start_count,
+						  seq->count, snap4, n4);
+		if (rw > 0)
+			record_global_hook_hit(VPNHIDE_HOOK_FIB_ROUTE_SEQ_SHOW);
 	}
 	return 0;
 }
@@ -2081,6 +2106,169 @@ static struct kretprobe getname6_krp = {
 };
 
 /* ================================================================== */
+/*  Hook 14: rtnl_unicast — single-lookup RTM_GETROUTE replies          */
+/*                                                                    */
+/*  int rtnl_unicast(struct sk_buff *skb, struct net *net, u32 portid)  */
+/*  arm64: x0=skb, x1=net                                               */
+/*                                                                    */
+/*  `ip route get <dst>`-style single queries (RTM_GETROUTE WITHOUT     */
+/*  NLM_F_DUMP) serialize through rt_fill_info — a static function in   */
+/*  net/ipv4/route.c whose argument registers are build-dependent       */
+/*  (interprocedural allocation; see the note above hook 9) — so the    */
+/*  dump-path hook cannot cover them. rtnl_unicast is the ABI-stable    */
+/*  EXPORT_SYMBOL every rtnetlink point-to-point reply funnels through: */
+/*  one finished message sitting in x0. Non-route messages bail on the  */
+/*  nlmsg type; v6 attrs (16-byte) are ignored, v4 DST/GATEWAY/PREFSRC  */
+/*  rewrite when a prefix4 rule on the reply's RTA_OIF iface covers     */
+/*  them. No entry state needed — the message carries its own needle.   */
+/* ================================================================== */
+
+struct rtnl_unicast_data {
+	struct sk_buff *skb;
+	struct net *net;
+};
+
+static int rtnl_unicast_entry(struct kretprobe_instance *ri,
+			      struct pt_regs *regs)
+{
+	struct rtnl_unicast_data *data = (void *)ri->data;
+	uid_t uid = from_kuid(&init_user_ns, current_uid());
+
+	data->skb = NULL;
+	data->net = NULL;
+	if (!READ_ONCE(prefix4_rules_present))
+		return 0;
+	if (!vpnhide_uid_prefix_filtered(uid))
+		return 0;
+	data->skb = (struct sk_buff *)regs->regs[0];
+	data->net = (struct net *)regs->regs[1];
+	return 0;
+}
+
+static void rtnl_route4_rewrite(struct sk_buff *skb, struct net *net)
+{
+	unsigned char *region;
+	unsigned long len, mlen, off, oif_pl = 0;
+	unsigned int oif = 0;
+	char ifname[IFNAMSIZ];
+	struct net_device *dev;
+	bool have_name = false;
+	struct vpnhide_prefix4_rule snap[MAX_PREFIX4_RULES];
+	int n4, hits = 0;
+
+	if (!skb || !skb->data || !net)
+		return;
+	region = skb->data;
+	len = skb->len;
+	if (len < NLMSG_HDRLEN + sizeof(struct rtmsg))
+		return;
+	/* rtnl_unicast carries exactly one message; nlmsg_type sits at
+	 * offset 4 of the header (u16, native endian). */
+	if ((unsigned int)region[4] | ((unsigned int)region[5] << 8) !=
+	    RTM_NEWROUTE)
+		return;
+	mlen = (unsigned long)region[0] | ((unsigned long)region[1] << 8) |
+	       ((unsigned long)region[2] << 16) | ((unsigned long)region[3] << 24);
+	if (mlen < NLMSG_HDRLEN + sizeof(struct rtmsg) || mlen > len)
+		mlen = len;
+
+	/* First pass: RTA_OIF (native u32) — the reply's egress iface. */
+	off = NLMSG_HDRLEN + sizeof(struct rtmsg);
+	while (off + 4 <= mlen) {
+		unsigned int alen = (unsigned int)region[off] |
+				    ((unsigned int)region[off + 1] << 8);
+		unsigned int atype = (unsigned int)region[off + 2] |
+				     ((unsigned int)region[off + 3] << 8);
+		unsigned long aligned;
+
+		if (alen < 4 || off + alen > mlen)
+			break;
+		if (atype == RTA_OIF && alen - 4 == 4) {
+			oif_pl = off + 4;
+			oif = (unsigned int)region[oif_pl] |
+			      ((unsigned int)region[oif_pl + 1] << 8) |
+			      ((unsigned int)region[oif_pl + 2] << 16) |
+			      ((unsigned int)region[oif_pl + 3] << 24);
+			break;
+		}
+		aligned = ((unsigned long)alen + 3UL) & ~3UL;
+		if (aligned == 0 || off + aligned <= off)
+			break;
+		off += aligned;
+	}
+	if (!oif_pl || !oif)
+		return;
+
+	rcu_read_lock();
+	dev = dev_get_by_index_rcu(net, (int)oif);
+	if (dev)
+		have_name = copy_dev_name(dev, ifname);
+	rcu_read_unlock();
+	if (!have_name)
+		return;
+
+	/* Snapshot the v4 rules; the walk below must not hold the lock. */
+	spin_lock(&targets_lock);
+	n4 = nr_prefix4_rules;
+	memcpy(snap, prefix4_rules, (size_t)n4 * sizeof(*snap));
+	spin_unlock(&targets_lock);
+
+	/* Second pass: rewrite covered 4-byte DST/GATEWAY/PREFSRC payloads. */
+	off = NLMSG_HDRLEN + sizeof(struct rtmsg);
+	while (off + 4 <= mlen) {
+		unsigned int alen = (unsigned int)region[off] |
+				    ((unsigned int)region[off + 1] << 8);
+		unsigned int atype = (unsigned int)region[off + 2] |
+				     ((unsigned int)region[off + 3] << 8);
+		unsigned long aligned;
+		int j;
+
+		if (alen < 4 || off + alen > mlen)
+			break;
+		if ((atype == RTA_DST || atype == RTA_GATEWAY ||
+		     atype == RTA_PREFSRC) &&
+		    alen - 4 == 4) {
+			for (j = 0; j < n4; j++) {
+				if (vpnhide_streq(ifname, snap[j].ifname) &&
+				    vpnhide_prefix4_match(region + off + 4,
+							  &snap[j])) {
+					memcpy(region + off + 4, snap[j].fake, 4);
+					hits++;
+					break;
+				}
+			}
+		}
+		aligned = ((unsigned long)alen + 3UL) & ~3UL;
+		if (aligned == 0 || off + aligned <= off)
+			break;
+		off += aligned;
+	}
+	if (hits > 0)
+		record_global_hook_hit(VPNHIDE_HOOK_RTNL_UNICAST);
+}
+
+static int rtnl_unicast_ret(struct kretprobe_instance *ri,
+			    struct pt_regs *regs)
+{
+	struct rtnl_unicast_data *data = (void *)ri->data;
+
+	if (!data->skb)
+		return 0;
+	if ((long)regs_return_value(regs) < 0)
+		return 0;
+	rtnl_route4_rewrite(data->skb, data->net);
+	return 0;
+}
+
+static struct kretprobe rtnl_unicast_krp = {
+	.handler = rtnl_unicast_ret,
+	.entry_handler = rtnl_unicast_entry,
+	.data_size = sizeof(struct rtnl_unicast_data),
+	.maxactive = VPNHIDE_KRETPROBE_MAXACTIVE,
+	.kp.symbol_name = "rtnl_unicast",
+};
+
+/* ================================================================== */
 /*  Module init / exit                                                */
 /* ================================================================== */
 
@@ -2113,6 +2301,7 @@ static struct kretprobe_reg probes[] = {
 	  false },
 	{ &getname_krp, "inet_getname", VPNHIDE_HOOK_INET_GETNAME, false },
 	{ &getname6_krp, "inet6_getname", VPNHIDE_HOOK_INET6_GETNAME, false },
+	{ &rtnl_unicast_krp, "rtnl_unicast", VPNHIDE_HOOK_RTNL_UNICAST, false },
 };
 
 /* Bitset of hooks that actually registered — the `status` hooks mask (§4.3). */

@@ -904,6 +904,131 @@ vpnhide_compact_if_inet6_lines(char *buf, unsigned long start,
 	return dst;
 }
 
+/* ====================================================================== */
+/*  /proc/net/route hex-column rewrite (prefix4 rules).                    */
+/*                                                                        */
+/*  Each line is "Iface\tDestination\tGateway\tFlags\t...", the address    */
+/*  columns exactly 8 uppercase hex chars — the little-endian %08X         */
+/*  spelling of the 4 network-order bytes (byte 0 lands in the LOW byte    */
+/*  of the printed u32). When a prefix4 rule covers a column's address on  */
+/*  the line's iface, the column is overwritten with the fake in the same  */
+/*  spelling — fixed width, so the line length and shape never change.     */
+/* ====================================================================== */
+
+/* Parse an 8-char LE-%08X route column into 4 network-order bytes. */
+static inline int vpnhide_route4_parse(const char *tok, unsigned char out[4])
+{
+	int i, hi, lo;
+
+	if (!tok || !out)
+		return 0;
+	for (i = 0; i < 4; i++) {
+		hi = vpnhide_hexval(tok[2 * (3 - i)]);
+		lo = vpnhide_hexval(tok[2 * (3 - i) + 1]);
+		if (hi < 0 || lo < 0)
+			return 0;
+		out[i] = (unsigned char)((hi << 4) | lo);
+	}
+	return 1;
+}
+
+/* Render 4 network-order bytes as the 8-char UPPERCASE LE-%08X column. */
+static inline void vpnhide_route4_render(char out[8],
+					 const unsigned char addr[4])
+{
+	static const char hexd[] = "0123456789ABCDEF";
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		out[2 * (3 - i)] = hexd[(addr[i] >> 4) & 0xf];
+		out[2 * (3 - i) + 1] = hexd[addr[i] & 0xf];
+	}
+}
+
+/*
+ * Rewrite Destination/Gateway columns of /proc/net/route lines in
+ * buf[start,count) in place (no length change — caller's seq count is
+ * untouched). A column rewrites when its address is covered by a prefix4
+ * rule on the line's iface; the fake comes from that rule. Returns the
+ * number of columns rewritten. Malformed lines (short fields, non-hex) are
+ * skipped untouched.
+ */
+static inline int
+vpnhide_rewrite_route4_lines(char *buf, unsigned long start,
+			     unsigned long count,
+			     const struct vpnhide_prefix4_rule *rules,
+			     int nr_rules)
+{
+	unsigned long src = start;
+	int rewritten = 0;
+
+	if (!buf || count <= start || !rules || nr_rules <= 0)
+		return 0;
+
+	while (src < count) {
+		unsigned long nl = src;
+		unsigned long line_end, fs, fe, ds, de, gs, ge;
+		char ifname[VPNHIDE_IFNAMSIZ];
+		unsigned char addr[4];
+		int col, i;
+
+		while (nl < count && buf[nl] != '\n')
+			nl++;
+		line_end = (nl < count) ? nl + 1 : count;
+
+		/* field 1: iface name, up to the first tab */
+		fs = src;
+		fe = fs;
+		while (fe < line_end && buf[fe] != '\t' && buf[fe] != '\n')
+			fe++;
+		if (fe - fs == 0 || fe - fs >= VPNHIDE_IFNAMSIZ)
+			goto next;
+		for (i = 0; i < (int)(fe - fs); i++)
+			ifname[i] = buf[fs + (unsigned long)i];
+		ifname[fe - fs] = '\0';
+
+		/* field 2: Destination */
+		ds = fe + 1;
+		de = ds;
+		while (de < line_end && buf[de] != '\t' && buf[de] != '\n')
+			de++;
+		/* field 3: Gateway */
+		gs = de + 1;
+		ge = gs;
+		while (ge < line_end && buf[ge] != '\t' && buf[ge] != '\n')
+			ge++;
+
+		for (col = 0; col < 2; col++) {
+			unsigned long ts = col == 0 ? ds : gs;
+			unsigned long te = col == 0 ? de : ge;
+			int j;
+
+			if (te - ts != 8)
+				continue;
+			if (!vpnhide_route4_parse(buf + ts, addr))
+				continue;
+			for (j = 0; j < nr_rules; j++) {
+				if (vpnhide_streq(ifname, rules[j].ifname) &&
+				    vpnhide_prefix4_match(addr, &rules[j])) {
+					char fakehex[8];
+					int k;
+
+					vpnhide_route4_render(fakehex,
+							      rules[j].fake);
+					for (k = 0; k < 8; k++)
+						buf[ts + (unsigned long)k] =
+							fakehex[k];
+					rewritten++;
+					break;
+				}
+			}
+		}
+next:
+		src = line_end;
+	}
+	return rewritten;
+}
+
 /* --- header (§4.2) --------------------------------------------------- */
 
 /*

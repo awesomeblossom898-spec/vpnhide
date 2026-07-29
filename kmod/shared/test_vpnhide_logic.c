@@ -569,6 +569,51 @@ static void test_rtattr_replace(void)
 	}
 }
 
+static void test_route4_column_rewrite(void)
+{
+	/* /proc/net/route: Destination/Gateway are fixed 8-char UPPERCASE
+	 * little-endian %08X columns. 100.110.255.23 (bytes 64 6E FF 17)
+	 * prints as "17FF6E64"; the fake 100.118.64.203 (64 76 40 CB) must
+	 * replace covered columns as "CB407664" — width- and case-exact. */
+	char buf[640] =
+		"Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+		"ccmni0\t00000000\t17FF6E64\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+		"ccmni0\t17FF6E64\t00000000\t0001\t0\t0\t0\tFFFFFFFF\t0\t0\t0\n"
+		"ccmni1\t00000000\t17FF6E64\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+		"wlan0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n";
+	struct vpnhide_prefix4_rule rules[1];
+	unsigned long count = strlen(buf);
+	int rw;
+
+	memset(&rules[0], 0, sizeof(rules[0]));
+	strcpy(rules[0].ifname, "ccmni0");
+	rules[0].addr[0] = 100;
+	rules[0].addr[1] = 64;
+	rules[0].prefix_len = 10;
+	rules[0].fake[0] = 100;
+	rules[0].fake[1] = 118;
+	rules[0].fake[2] = 64;
+	rules[0].fake[3] = 203;
+
+	rw = vpnhide_rewrite_route4_lines(buf, 0, count, rules, 1);
+	expect_int("route4: gateway + host-dst rewritten", rw, 2);
+	expect_str(
+		"route4: covered columns faked, rest verbatim", buf,
+		"Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+		"ccmni0\t00000000\tCB407664\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+		"ccmni0\tCB407664\t00000000\t0001\t0\t0\t0\tFFFFFFFF\t0\t0\t0\n"
+		"ccmni1\t00000000\t17FF6E64\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+		"wlan0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n");
+	/* In-place only: length never changes. */
+	expect_int("route4: length unchanged", (int)count,
+		   (int)strlen(
+			   "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n"
+			   "ccmni0\t00000000\tCB407664\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+			   "ccmni0\tCB407664\t00000000\t0001\t0\t0\t0\tFFFFFFFF\t0\t0\t0\n"
+			   "ccmni1\t00000000\t17FF6E64\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+			   "wlan0\t00000000\t0101A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"));
+}
+
 int main(void)
 {
 	test_route_first_field();
@@ -588,6 +633,7 @@ int main(void)
 	test_compact_if_inet6_rewrite();
 	test_compact_ipv6_route_rewrite();
 	test_rtattr_replace();
+	test_route4_column_rewrite();
 
 	if (failures) {
 		fprintf(stderr, "%d test(s) failed\n", failures);

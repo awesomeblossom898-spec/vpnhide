@@ -198,6 +198,13 @@ backend = "kernel"
 kpm = false
 note = "getsockname(2) — rewrite rule-covered local IPv6 sockaddr (fake /64 + real IID)"
 
+[[hook]]
+id = 28
+name = "rtnl_unicast"
+backend = "kernel"
+kpm = false
+note = "single-lookup RTM_GETROUTE replies — rewrite covered v4 route addrs"
+
 # --- backend ids (protocol §4.3 `status backend <id>`) ----------------------
 # Which backend answered a `status` read. Distinct from the hook `backend`
 # field above (.ko and KPM both own "kernel" hooks but are separate backends).

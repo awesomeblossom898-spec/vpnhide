@@ -54,6 +54,7 @@ internal enum class DetectionMethod(
                 HookIds.Hook.IPV6_ROUTE_SEQ_SHOW,
                 HookIds.Hook.FIB_DUMP_INFO,
                 HookIds.Hook.RT6_FILL_NODE,
+                HookIds.Hook.RTNL_UNICAST,
                 -> Routes
 
                 HookIds.Hook.RTNL_FILL_IFINFO,

@@ -62,13 +62,15 @@ pub enum Hook {
     InetGetname = 26,
     /// getsockname(2) — rewrite rule-covered local IPv6 sockaddr (fake /64 + real IID)
     Inet6Getname = 27,
+    /// single-lookup RTM_GETROUTE replies — rewrite covered v4 route addrs
+    RtnlUnicast = 28,
 }
 
-pub const HOOK_COUNT: u32 = 28;
+pub const HOOK_COUNT: u32 = 29;
 
 /// Hooks owned by each backend: apply `mask & own`.
 /// KPM is the subset of the kernel hooks the KPM backend installs.
-pub const KERNEL_HOOK_MASK: u32 = 0xe0003ff;
+pub const KERNEL_HOOK_MASK: u32 = 0x1e0003ff;
 pub const KPM_HOOK_MASK: u32 = 0x3ff;
 pub const ZYGISK_HOOK_MASK: u32 = 0x1fc0000;
 pub const LSPOSED_HOOK_MASK: u32 = 0x3fc00;
@@ -103,7 +105,7 @@ pub enum Backend {
     Lsposed = 3,
 }
 
-pub const HOOK_NAMES: [&str; 28] = [
+pub const HOOK_NAMES: [&str; 29] = [
     "fib_route_seq_show",
     "ipv6_route_seq_show",
     "rtnl_fill_ifinfo",
@@ -132,4 +134,5 @@ pub const HOOK_NAMES: [&str; 28] = [
     "if6_seq_show",
     "inet_getname",
     "inet6_getname",
+    "rtnl_unicast",
 ];

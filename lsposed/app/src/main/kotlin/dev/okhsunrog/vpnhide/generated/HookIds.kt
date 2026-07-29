@@ -92,11 +92,14 @@ internal object HookIds {
 
         // getsockname(2) — rewrite rule-covered local IPv6 sockaddr (fake /64 + real IID)
         INET6_GETNAME(27, "inet6_getname", "getsockname(2) — rewrite rule-covered local IPv6 sockaddr (fake /64 + real IID)"),
+
+        // single-lookup RTM_GETROUTE replies — rewrite covered v4 route addrs
+        RTNL_UNICAST(28, "rtnl_unicast", "single-lookup RTM_GETROUTE replies — rewrite covered v4 route addrs"),
     }
 
     // Hooks owned by each backend: apply `mask and own`.
     // KPM is the subset of the kernel hooks the KPM backend installs.
-    const val KERNEL_HOOK_MASK = 0xe0003ff
+    const val KERNEL_HOOK_MASK = 0x1e0003ff
     const val KPM_HOOK_MASK = 0x3ff
     const val ZYGISK_HOOK_MASK = 0x1fc0000
     const val LSPOSED_HOOK_MASK = 0x3fc00
